@@ -61,6 +61,7 @@ from chatgpt_api.providers.chatgpt.auth import ChatGPTAuthConfig
 from chatgpt_api.providers.chatgpt.crypto import encrypt_text, load_secrets_key
 from chatgpt_api.providers.chatgpt.provider import ChatGPTProvider
 from chatgpt_api.providers.chatgpt.request_capture import CapturedRequest, SECRET_HEADER_NAMES
+from chatgpt_api.providers.chatgpt.models import build_model_capabilities, resolve_model_alias
 from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport
 
 
@@ -786,14 +787,15 @@ def _account_supports_model(
         return None
     settings_path = resolve_account_settings_path(account, config.accounts_dir)
     settings = load_settings_file(str(settings_path)) if settings_path.exists() else {}
-    capabilities = infer_account_capabilities(detect_account_info(capture, settings))
+    info = detect_account_info(capture, settings)
+    capabilities = infer_account_capabilities(info)
     supported_models = set(capabilities.get("supported_models") or [])
     if model_slug not in supported_models:
         return False
-    if model_slug == "gpt-5-5-thinking" and thinking_effort:
-        return thinking_effort in set(capabilities.get("thinking_efforts") or [])
-    if model_slug == "gpt-5-5-pro" and thinking_effort:
-        return thinking_effort in set(capabilities.get("pro_efforts") or [])
+    if thinking_effort:
+        model_efforts = capabilities.get("model_efforts")
+        supported_efforts = model_efforts.get(model_slug, []) if isinstance(model_efforts, dict) else []
+        return thinking_effort in set(supported_efforts)
     return True
 
 
@@ -974,7 +976,7 @@ async def _chat_completion(
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
-    requested_model = _str_or_none(body.get("model")) or "gpt-5-5"
+    requested_model = _str_or_none(body.get("model")) or "auto"
     model, model_agent_mode = _split_model_agent_mode(requested_model)
     agent_prompt_mode = _resolve_agent_prompt_mode(config, body, model_agent_mode)
     model_slug, thinking_effort = _resolve_model_alias(model, _str_or_none(body.get("thinking_effort")))
@@ -1187,7 +1189,7 @@ async def _chat_completion_stream(
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
-    requested_model = _str_or_none(body.get("model")) or "gpt-5-5"
+    requested_model = _str_or_none(body.get("model")) or "auto"
     model, model_agent_mode = _split_model_agent_mode(requested_model)
     agent_prompt_mode = _resolve_agent_prompt_mode(config, body, model_agent_mode)
     model_slug, thinking_effort = _resolve_model_alias(model, _str_or_none(body.get("thinking_effort")))
@@ -4377,14 +4379,21 @@ def _models_response(config: OpenAICompatConfig) -> dict[str, Any]:
     return {
         "object": "list",
         "data": [
-            {"id": model["id"], "object": "model", "created": 0, "owned_by": "chatgpt-web"}
+            {
+                "id": model["id"],
+                "object": "model",
+                "created": 0,
+                "owned_by": "chatgpt-web",
+                **({"name": model["name"]} if model.get("name") else {}),
+                **({"chatgpt": model["chatgpt"]} if model.get("chatgpt") else {}),
+            }
             for model in models
         ],
     }
 
 
-def _models_for_config(config: OpenAICompatConfig) -> list[dict[str, str]]:
-    merged: dict[str, dict[str, str]] = {}
+def _models_for_config(config: OpenAICompatConfig) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
     for account in _accounts_for_config(config):
         for model in _models_for_account(config, account):
             merged.setdefault(model["id"], model)
@@ -4393,7 +4402,7 @@ def _models_for_config(config: OpenAICompatConfig) -> list[dict[str, str]]:
     return list(merged.values())
 
 
-def _models_for_account(config: OpenAICompatConfig, account: str | None = None) -> list[dict[str, str]]:
+def _models_for_account(config: OpenAICompatConfig, account: str | None = None) -> list[dict[str, Any]]:
     selected_account = account or config.account
     capture_path = resolve_account_capture_path(selected_account, config.accounts_dir)
     models: list[dict[str, str]] = [{"id": "auto", "name": "ChatGPT Auto"}]
@@ -4404,51 +4413,43 @@ def _models_for_account(config: OpenAICompatConfig, account: str | None = None) 
     settings = load_settings_file(str(settings_path)) if settings_path.exists() else {}
     capabilities = infer_account_capabilities(detect_account_info(capture, settings))
 
-    if "gpt-5-5" in capabilities["supported_models"]:
-        models.append({"id": "gpt-5-5", "name": "GPT-5.5"})
-    if capabilities.get("thinking_model"):
-        for effort, label in {
-            "standard": "Medium",
-            "extended": "High",
-            "max": "Extra High",
-        }.items():
-            if effort in capabilities["thinking_efforts"]:
-                models.append({"id": f"gpt-5-5-thinking-{effort}", "name": f"GPT-5.5 {label}"})
-    if capabilities.get("pro_model"):
-        for effort, label in {
-            "standard": "Pro Standard",
-            "extended": "Pro Extended",
-        }.items():
-            if effort in capabilities["pro_efforts"]:
-                models.append({"id": f"gpt-5-5-pro-{effort}", "name": f"GPT-5.5 {label}"})
+    normalized = build_model_capabilities(
+        capabilities["supported_models"],
+        model_efforts=capabilities.get("model_efforts"),
+        observed_models=info.observed_models,
+    )
+    models = [
+        {
+            "id": capability.id,
+            "name": capability.name,
+            "chatgpt": {
+                "provider_model": capability.provider_model,
+                "mode": capability.mode,
+                "thinking_effort": capability.thinking_effort,
+                "source": capability.source,
+                "status": capability.status,
+                "replacement": capability.replacement,
+            },
+        }
+        for capability in normalized
+    ]
     return _models_with_agent_modes(models)
 
 
-def _models_with_agent_modes(models: list[dict[str, str]]) -> list[dict[str, str]]:
+def _models_with_agent_modes(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
     expanded = list(models)
     for model in models:
         model_id = model["id"]
         model_name = model["name"]
-        expanded.append({"id": f"{model_id}@optimized", "name": f"{model_name} (optimized agent bridge)"})
-        expanded.append({"id": f"{model_id}@opencode", "name": f"{model_name} (opencode prompt bridge)"})
+        expanded.append({**model, "id": f"{model_id}@optimized", "name": f"{model_name} (optimized agent bridge)"})
+        expanded.append({**model, "id": f"{model_id}@opencode", "name": f"{model_name} (opencode prompt bridge)"})
     return expanded
 
 
 def _resolve_model_alias(model: str, explicit_effort: str | None) -> tuple[str, str | None]:
     if model in DEEP_RESEARCH_MODEL_ALIASES:
         return "auto", None
-    aliases = {
-        "gpt-5-5-thinking-standard": ("gpt-5-5-thinking", "standard"),
-        "gpt-5-5-thinking-extended": ("gpt-5-5-thinking", "extended"),
-        "gpt-5-5-thinking-max": ("gpt-5-5-thinking", "max"),
-        "gpt-5-5-pro-standard": ("gpt-5-5-pro", "standard"),
-        "gpt-5-5-pro-extended": ("gpt-5-5-pro", "extended"),
-    }
-    if model in aliases:
-        return aliases[model]
-    if model == "auto":
-        return "auto", None
-    return model, explicit_effort
+    return resolve_model_alias(model, explicit_effort)
 
 
 def _resolve_image_model_alias(model: str) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -24,6 +25,7 @@ PLAN_TYPES_WITH_THINKING_MODEL = {"plus", "pro", "team", "enterprise", "edu"}
 PLAN_TYPES_WITH_PRO_MODEL = {"pro"}
 DEFAULT_PRO_EFFORTS = ["standard", "extended"]
 DEFAULT_THINKING_EFFORTS = ["standard", "extended", "max"]
+CHAT_MODEL_SLUG = re.compile(r"^gpt-\d")
 
 
 @dataclass(slots=True)
@@ -106,9 +108,22 @@ def infer_account_capabilities(info: ChatGPTAccountInfo) -> dict[str, Any]:
     if _allows_pro_model(info):
         _append_unique(supported_models, PRO_MODEL)
 
+    if plan_type not in AUTO_ONLY_PLAN_TYPES:
+        for model in info.observed_models:
+            if CHAT_MODEL_SLUG.match(model):
+                _append_unique(supported_models, model)
+
     default_model = _default_supported_model(info, supported_models)
     thinking_efforts = _thinking_efforts(info) if THINKING_MODEL in supported_models else []
     pro_efforts = _pro_efforts(info) if PRO_MODEL in supported_models else []
+    model_efforts: dict[str, list[str]] = {}
+    for model in supported_models:
+        if model == THINKING_MODEL:
+            model_efforts[model] = thinking_efforts
+        elif model == PRO_MODEL:
+            model_efforts[model] = pro_efforts
+        elif model.endswith(("-thinking", "-pro")):
+            model_efforts[model] = _model_efforts(info, model)
 
     return {
         "plan_type": info.plan_type,
@@ -119,6 +134,7 @@ def infer_account_capabilities(info: ChatGPTAccountInfo) -> dict[str, Any]:
         "thinking_efforts": thinking_efforts,
         "pro_model": PRO_MODEL if PRO_MODEL in supported_models else None,
         "pro_efforts": pro_efforts,
+        "model_efforts": model_efforts,
         "backend_reasoning_efforts": info.settings_available_reasoning_efforts,
         "auto_model": "auto",
         "auto_only": bool(auto_only_reason),
