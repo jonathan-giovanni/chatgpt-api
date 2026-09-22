@@ -1,8 +1,7 @@
 # Entorno local de Windows
 
 Preparación del 22 de septiembre de 2026. Esta etapa se limita al entorno y a
-la validación del proyecto existente. El bootstrap de GitHub, la modernización
-de modelos y Projects descritos en los documentos adjuntos son fases posteriores.
+la validación reproducible del proyecto existente.
 
 ## Arranque
 
@@ -54,7 +53,6 @@ global ni carga credenciales. El Node 18 del sistema se conserva.
 WSL 2.5.7 impedía importar `docker-desktop-data` con
 `WSL_E_NOT_A_LINUX_DISTRO`. Tras actualizar WSL y reiniciar Docker, el motor
 arrancó. No se borraron distribuciones, volúmenes ni datos existentes.
-Referencia: [incidencia de Docker/WSL](https://github.com/docker/for-win/issues/14802).
 
 ## Comprobaciones reproducibles
 
@@ -116,13 +114,9 @@ temporal del contenedor, instaló `.[dev]` y ejecutó `compileall` y `pytest -q`
 El checkout se montó en modo de solo lectura; la comprobación de permisos se
 ejecutó sobre el sistema de archivos Linux, no sobre el volumen Windows.
 
-Después del baseline se añadió una captura real bajo el alias local
-`info-gpt-work` y se verificó sin registrar credenciales ni contenido. La cuenta
-responde como Plus y expone el modelo interno observado
-`gpt-5-6-thinking`. El alias histórico `free` contiene actualmente una copia de
-la misma captura; se conserva hasta depurar el routing y no debe interpretarse
-como una segunda cuenta. Las capturas viven bajo `secrets/` y siguen excluidas
-de Git.
+Después del baseline se verificó una captura local sin registrar credenciales,
+contenido ni alias privados. La cuenta expuso el modelo interno observado
+`gpt-5-6-thinking`. Las capturas viven bajo `secrets/` y siguen excluidas de Git.
 
 En Windows nativo, la suite inicial dio **189 passed, 1 failed** (14.51 s).
 `test_load_secrets_key_creates_owner_only_key_file` exige permisos POSIX `0600`;

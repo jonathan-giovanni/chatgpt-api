@@ -6,7 +6,7 @@ Projects.
 
 ## Evidencia observada
 
-La captura real de una conversación de **INCIDENCIAS** contiene:
+Una captura sanitizada de una conversación dentro de un Project contiene:
 
 ```json
 {
@@ -46,15 +46,15 @@ Authorization: Bearer <bridge-key>
 Content-Type: application/json
 
 {
-  "name": "INVESTIGACION",
-  "alias": "investigacion",
+  "name": "Support",
+  "alias": "support",
   "project_id": "<local-project-id>",
-  "account": "info-gpt-work"
+  "account": "plus-work"
 }
 ```
 
-Los nombres no distinguen mayúsculas ni acentos. `INVESTIGACIÓN`,
-`INVESTIGACION` e `investigacion` resuelven al mismo alias normalizado.
+Los nombres no distinguen mayúsculas ni acentos. El operador puede usar el
+nombre visible o su alias normalizado.
 
 ## Iniciar un chat
 
@@ -63,7 +63,7 @@ Usa el nombre o alias en `chatgpt_project`:
 ```json
 {
   "model": "auto",
-  "chatgpt_project": "INVESTIGACION",
+  "chatgpt_project": "support",
   "messages": [{"role":"user","content":"Resume el estado actual."}]
 }
 ```
@@ -81,10 +81,8 @@ asociados al Project.
 
 El protocolo web no es oficial y puede cambiar. Las pruebas unitarias fijan la
 forma observada, la resolución de alias, la precedencia, el aislamiento del
-chat normal y el enmascarado. Las pruebas live deben usar mensajes inocuos,
-comprobar INCIDENCIAS, INVESTIGACION y chat normal, y no registrar contenido.
-
-La captura disponible demuestra INCIDENCIAS. INVESTIGACION fue identificado en
-la misma cuenta mediante su URL de Project y se guarda sólo como mapping local.
-Una verificación live de ambos Projects sigue siendo necesaria después de cada
-cambio relevante de ChatGPT Web.
+chat normal y el enmascarado. Las pruebas live deben usar Projects de prueba y
+mensajes inocuos, comparar chat con y sin Project, y no registrar contenido.
+Los nombres, cuentas e identificadores reales se guardan sólo como mappings
+locales. Conviene repetir una verificación live después de cada cambio relevante
+de ChatGPT Web.

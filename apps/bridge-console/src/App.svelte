@@ -3462,7 +3462,7 @@
               <Input
                 label="Alias (optional)"
                 bind:value={projectAlias}
-                placeholder="investigacion"
+                placeholder="support"
               />
               <Input label="Project id" bind:value={projectId} />
               <label class="block">

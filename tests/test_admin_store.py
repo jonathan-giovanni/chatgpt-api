@@ -41,17 +41,17 @@ def test_artifacts_hide_missing_files(tmp_path):
 def test_project_mappings_resolve_name_alias_and_id(tmp_path):
     store = BridgeAdminStore(tmp_path / "admin.sqlite")
     mapping = ProjectMapping(
-        alias="investigacion",
-        name="INVESTIGACION",
+        alias="support",
+        name="Support",
         project_id="g-p-0123456789abcdef0123456789abcdef",
         account="plus-work",
     )
 
     store.upsert_project(mapping)
 
-    assert store.resolve_project("INVESTIGACION") == mapping
-    assert store.resolve_project("investigacion") == mapping
+    assert store.resolve_project("Support") == mapping
+    assert store.resolve_project("support") == mapping
     assert store.resolve_project(mapping.project_id) == mapping
     assert store.list_projects() == [mapping]
-    assert store.delete_project("INVESTIGACION") is True
-    assert store.resolve_project("investigacion") is None
+    assert store.delete_project("Support") is True
+    assert store.resolve_project("support") is None

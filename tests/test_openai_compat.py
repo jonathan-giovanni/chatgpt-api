@@ -1476,22 +1476,22 @@ def test_project_selection_resolves_name_and_forces_its_account(tmp_path):
     compat._admin_project_save_payload(
         config,
         {
-            "alias": "investigacion",
-            "name": "INVESTIGACION",
+            "alias": "support",
+            "name": "Support",
             "project_id": "g-p-0123456789abcdef0123456789abcdef",
             "account": "plus-work",
         },
     )
-    body = {"chatgpt_project": "INVESTIGACION", "messages": []}
+    body = {"chatgpt_project": "Support", "messages": []}
 
     mapping = compat._resolve_project_request(config, body)
 
     assert mapping is not None
-    assert mapping.alias == "investigacion"
+    assert mapping.alias == "support"
     assert body["chatgpt_account"] == "plus-work"
     assert compat._resolve_temporary_chat_mode(config, body) is False
     projects = compat._admin_projects_response(config)
-    assert projects["data"][0]["name"] == "INVESTIGACION"
+    assert projects["data"][0]["name"] == "Support"
     assert projects["data"][0]["project_id"] == "g-p-01…cdef"
 
 
@@ -1516,7 +1516,7 @@ def test_chat_completion_reports_resolved_project_without_exposing_id(monkeypatc
     compat._admin_project_save_payload(
         config,
         {
-            "name": "INCIDENCIAS",
+            "name": "Support",
             "project_id": "g-p-0123456789abcdef0123456789abcdef",
             "account": "plus-work",
         },
@@ -1530,15 +1530,15 @@ def test_chat_completion_reports_resolved_project_without_exposing_id(monkeypatc
         compat._chat_completion(
             config,
             {
-                "chatgpt_project": "INCIDENCIAS",
+                "chatgpt_project": "Support",
                 "messages": [{"role": "user", "content": "test"}],
             },
         )
     )
 
     assert response["chatgpt_project"] == {
-        "alias": "incidencias",
-        "name": "INCIDENCIAS",
+        "alias": "support",
+        "name": "Support",
         "account": "plus-work",
     }
     assert "0123456789abcdef" not in json.dumps(response)

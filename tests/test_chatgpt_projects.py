@@ -8,14 +8,14 @@ from chatgpt_api.providers.chatgpt.projects import (
 
 
 def test_project_aliases_are_case_and_accent_insensitive():
-    assert normalize_project_alias("  INVESTIGACIÓN  ") == "investigacion"
-    assert normalize_project_alias("Incidencias") == "incidencias"
+    assert normalize_project_alias("  ATENCIÓN  ") == "atencion"
+    assert normalize_project_alias("Customer Support") == "customer-support"
 
 
 def test_project_mapping_keeps_real_id_out_of_public_payload():
     mapping = validate_project_mapping(
-        "investigacion",
-        "INVESTIGACION",
+        "support",
+        "Support",
         "g-p-0123456789abcdef0123456789abcdef",
         "plus-work",
     )
