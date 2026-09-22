@@ -1448,6 +1448,102 @@ def test_models_for_config_handles_missing_capture(tmp_path):
     assert "chatgpt-deep-research" in ids
 
 
+def test_models_for_config_uses_observed_model_from_capture(tmp_path):
+    account_dir = tmp_path / "plus-work"
+    account_dir.mkdir(parents=True)
+    (account_dir / "chatgpt-request.txt").write_text(
+        "URL: https://chatgpt.com/backend-api/f/conversation\n\n"
+        'Payload: {"action":"next","model":"gpt-5-6-thinking",'
+        '"thinking_effort":"extended"}\n',
+        encoding="utf-8",
+    )
+
+    models = _models_for_config(
+        OpenAICompatConfig(account="plus-work", accounts_dir=tmp_path)
+    )
+
+    ids = {model["id"] for model in models}
+    assert "gpt-5-6-thinking-extended" in ids
+
+
+def test_project_selection_resolves_name_and_forces_its_account(tmp_path):
+    config = OpenAICompatConfig(
+        account="plus-work",
+        accounts=("plus-work",),
+        accounts_dir=tmp_path / "accounts",
+        admin_db_path=tmp_path / "admin.sqlite",
+    )
+    compat._admin_project_save_payload(
+        config,
+        {
+            "alias": "investigacion",
+            "name": "INVESTIGACION",
+            "project_id": "g-p-0123456789abcdef0123456789abcdef",
+            "account": "plus-work",
+        },
+    )
+    body = {"chatgpt_project": "INVESTIGACION", "messages": []}
+
+    mapping = compat._resolve_project_request(config, body)
+
+    assert mapping is not None
+    assert mapping.alias == "investigacion"
+    assert body["chatgpt_account"] == "plus-work"
+    assert compat._resolve_temporary_chat_mode(config, body) is False
+    projects = compat._admin_projects_response(config)
+    assert projects["data"][0]["name"] == "INVESTIGACION"
+    assert projects["data"][0]["project_id"] == "g-p-01…cdef"
+
+
+def test_project_selection_is_optional_and_rejects_unknown_name(tmp_path):
+    config = OpenAICompatConfig(account="plus-work", admin_db_path=tmp_path / "admin.sqlite")
+
+    assert compat._resolve_project_request(config, {"messages": []}) is None
+    with pytest.raises(ValueError, match="unknown ChatGPT Project"):
+        compat._resolve_project_request(
+            config,
+            {"chatgpt_project": "NO-EXISTE", "messages": []},
+        )
+
+
+def test_chat_completion_reports_resolved_project_without_exposing_id(monkeypatch, tmp_path):
+    config = OpenAICompatConfig(
+        account="plus-work",
+        accounts=("plus-work",),
+        accounts_dir=tmp_path / "accounts",
+        admin_db_path=tmp_path / "admin.sqlite",
+    )
+    compat._admin_project_save_payload(
+        config,
+        {
+            "name": "INCIDENCIAS",
+            "project_id": "g-p-0123456789abcdef0123456789abcdef",
+            "account": "plus-work",
+        },
+    )
+
+    async def fake_completion(config, body, router):
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(compat, "_chat_completion_with_project", fake_completion)
+    response = compat.asyncio.run(
+        compat._chat_completion(
+            config,
+            {
+                "chatgpt_project": "INCIDENCIAS",
+                "messages": [{"role": "user", "content": "test"}],
+            },
+        )
+    )
+
+    assert response["chatgpt_project"] == {
+        "alias": "incidencias",
+        "name": "INCIDENCIAS",
+        "account": "plus-work",
+    }
+    assert "0123456789abcdef" not in json.dumps(response)
+
+
 def test_provider_for_account_reports_missing_capture(tmp_path):
     with pytest.raises(ProviderError, match="account capture"):
         _provider_for_account(OpenAICompatConfig(account="free", accounts_dir=tmp_path))

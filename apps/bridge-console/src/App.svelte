@@ -627,6 +627,14 @@
     owned_by?: string;
     name?: string;
   };
+  type ProjectRow = {
+    alias: string;
+    name: string;
+    account: string;
+    state: string;
+    project_id?: string;
+    last_verified_at?: string;
+  };
   type CapacityAccount = {
     name: string;
     plan: string;
@@ -658,6 +666,7 @@
   const pages = [
     ["overview", "Overview", "Run status, setup flow, live accounts"],
     ["accounts", "Accounts", "Paste captures, repair broken accounts"],
+    ["projects", "Projects", "Map names and route new conversations"],
     ["test-lab", "Test Lab", "Chat, context, image, and research calls"],
     ["limits", "Limits", "Per-plan and per-account runtime throttles"],
     ["api-docs", "Docs", "API, CLI, Docker, and route examples"],
@@ -677,6 +686,7 @@
   let liveByAccount = $state<Record<string, LiveAccount>>({});
   let artifacts = $state<Artifact[]>([]);
   let modelRows = $state<ModelRow[]>([]);
+  let projects = $state<ProjectRow[]>([]);
   let lastError = $state("");
   let apiLatencyMs = $state<number | null>(null);
   let lastHealthCheckAt = $state("");
@@ -695,6 +705,11 @@
   let newCaptureAccount = $state("plus-work");
   let newCaptureText = $state("");
   let newCaptureResult = $state<Json | null>(null);
+  let selectedChatProject = $state("");
+  let projectName = $state("");
+  let projectAlias = $state("");
+  let projectId = $state("");
+  let projectAccount = $state("");
 
   let chatModel = $state("auto");
   let chatPrompt = $state(
@@ -761,6 +776,9 @@
       model: chatModel || "auto",
       messages: [{ role: "user", content: chatPrompt }],
       stream: false,
+      ...(selectedChatProject
+        ? { chatgpt_project: selectedChatProject }
+        : {}),
     }),
   );
   const contextMessages = $derived([
@@ -774,6 +792,9 @@
       model: chatModel || "auto",
       messages: contextMessages,
       stream: false,
+      ...(selectedChatProject
+        ? { chatgpt_project: selectedChatProject }
+        : {}),
     }),
   );
   const imageCurl = $derived(
@@ -937,6 +958,7 @@
         loadAccounts(),
         loadArtifacts(),
         loadModels(),
+        loadProjects(),
       ]);
     });
     void loadUsage().catch((error) => {
@@ -1008,6 +1030,47 @@
   async function loadAccounts() {
     const payload = await apiFetch("/chatgpt/admin/accounts");
     accounts = payload.accounts ?? [];
+  }
+
+  async function loadProjects() {
+    const payload = await apiFetch("/chatgpt/admin/projects");
+    projects = Array.isArray(payload?.data) ? payload.data : [];
+    if (
+      selectedChatProject &&
+      !projects.some((project) => project.alias === selectedChatProject)
+    ) {
+      selectedChatProject = "";
+    }
+  }
+
+  async function saveProject() {
+    await runTask("save-project", async () => {
+      await apiFetch("/chatgpt/admin/projects/save", {
+        method: "POST",
+        body: JSON.stringify({
+          name: projectName,
+          alias: projectAlias || projectName,
+          project_id: projectId,
+          account: projectAccount,
+        }),
+      });
+      projectName = "";
+      projectAlias = "";
+      projectId = "";
+      await loadProjects();
+      showToast("Project mapping saved");
+    });
+  }
+
+  async function deleteProject(alias: string) {
+    await runTask("delete-project", async () => {
+      await apiFetch("/chatgpt/admin/projects/delete", {
+        method: "POST",
+        body: JSON.stringify({ project: alias }),
+      });
+      await loadProjects();
+      showToast(`Project ${alias} removed`);
+    });
   }
 
   async function loadModels() {
@@ -1210,6 +1273,9 @@
         body: JSON.stringify({
           model: chatModel || "auto",
           message: chatPrompt,
+          ...(selectedChatProject
+            ? { chatgpt_project: selectedChatProject }
+            : {}),
         }),
       });
       chatResult = `${payload.latency_ms}ms\n\n${payload.content || JSON.stringify(payload.response, null, 2)}`;
@@ -1225,6 +1291,9 @@
           model: chatModel || "auto",
           messages: contextMessages,
           stream: false,
+          ...(selectedChatProject
+            ? { chatgpt_project: selectedChatProject }
+            : {}),
         }),
       });
       contextResult =
@@ -3321,6 +3390,104 @@
             </article>
           </div>
         </section>
+      {:else if page === "projects"}
+        <section class="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_420px]">
+          <article
+            class="rounded-[2rem] border border-white/10 bg-slate-900/80 p-5"
+          >
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <PanelTitle kicker="routing" title="ChatGPT Projects" />
+              <button
+                class="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 font-bold"
+                onclick={loadProjects}
+              >
+                Reload
+              </button>
+            </div>
+            <p class="mt-2 text-sm text-slate-400">
+              Select a local name when starting a conversation. The bridge
+              resolves the private Project id and its account. Leaving the
+              selection empty creates a normal conversation outside Projects.
+            </p>
+
+            <div class="mt-5 grid gap-3">
+              {#each projects as project (project.alias)}
+                <div
+                  class="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4"
+                >
+                  <div>
+                    <div class="font-black text-slate-100">{project.name}</div>
+                    <div class="mt-1 text-xs text-slate-500">
+                      {project.alias} · {project.account} · {project.project_id}
+                    </div>
+                  </div>
+                  <div class="flex gap-2">
+                    <button
+                      class="rounded-xl bg-sky-300 px-3 py-2 text-xs font-black text-slate-950"
+                      onclick={() => {
+                        selectedChatProject = project.alias;
+                        setPage("test-lab");
+                      }}
+                    >
+                      Use in chat
+                    </button>
+                    <button
+                      class="rounded-xl border border-white/10 px-3 py-2 text-xs font-black text-rose-200"
+                      onclick={() => deleteProject(project.alias)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              {:else}
+                <div
+                  class="rounded-2xl border border-dashed border-white/15 p-5 text-sm text-slate-500"
+                >
+                  No local Project mappings yet.
+                </div>
+              {/each}
+            </div>
+          </article>
+
+          <aside
+            class="rounded-[2rem] border border-white/10 bg-slate-900/80 p-5 xl:sticky xl:top-5 xl:self-start"
+          >
+            <PanelTitle kicker="local mapping" title="Add or update" />
+            <p class="mt-2 text-sm text-slate-400">
+              The real id stays in the local SQLite database and is masked in
+              API responses.
+            </p>
+            <div class="mt-4 grid gap-3">
+              <Input label="Project name" bind:value={projectName} />
+              <Input
+                label="Alias (optional)"
+                bind:value={projectAlias}
+                placeholder="investigacion"
+              />
+              <Input label="Project id" bind:value={projectId} />
+              <label class="block">
+                <span class="text-sm font-bold text-slate-300">Account</span>
+                <select
+                  class="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950 px-3 py-3 outline-none focus:border-sky-300/60"
+                  bind:value={projectAccount}
+                >
+                  <option value="">Select account</option>
+                  {#each accountNames as account (account)}
+                    <option value={account}>{account}</option>
+                  {/each}
+                </select>
+              </label>
+              <button
+                class="rounded-2xl bg-sky-300 px-4 py-3 font-black text-slate-950"
+                onclick={saveProject}
+                disabled={!projectName.trim() || !projectId.trim() || !projectAccount}
+              >
+                Save mapping
+              </button>
+            </div>
+          </aside>
+        </section>
+
       {:else if page === "accounts"}
         <section class="grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_420px]">
           <article
@@ -3656,6 +3823,22 @@
             class="rounded-[2rem] border border-white/10 bg-slate-900/80 p-5"
           >
             <PanelTitle kicker="chat" title="Single message test" />
+            <label class="mt-4 block">
+              <span class="text-sm font-bold text-slate-300"
+                >Project for new conversation (optional)</span
+              >
+              <select
+                class="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950 px-3 py-3 outline-none focus:border-sky-300/60"
+                bind:value={selectedChatProject}
+              >
+                <option value="">Outside Projects</option>
+                {#each projects as project (project.alias)}
+                  <option value={project.alias}
+                    >{project.name} · {project.account}</option
+                  >
+                {/each}
+              </select>
+            </label>
             <Input label="Model" bind:value={chatModel} />
             <Textarea label="Message" bind:value={chatPrompt} rows={5} />
             <button

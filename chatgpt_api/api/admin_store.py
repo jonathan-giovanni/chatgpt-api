@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from chatgpt_api.providers.chatgpt.projects import ProjectMapping, normalize_project_alias
+
 
 def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -60,6 +62,20 @@ class BridgeAdminStore:
                     value_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS project_mappings (
+                    alias TEXT PRIMARY KEY COLLATE NOCASE,
+                    name TEXT NOT NULL,
+                    project_id TEXT NOT NULL UNIQUE,
+                    account TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'configured',
+                    last_verified_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS project_mappings_account_idx
+                    ON project_mappings(account, name COLLATE NOCASE);
                 """
             )
 
@@ -205,6 +221,66 @@ class BridgeAdminStore:
             cursor = db.execute("DELETE FROM settings WHERE key = ?", (key,))
             return cursor.rowcount > 0
 
+    def upsert_project(self, mapping: ProjectMapping) -> None:
+        now = utc_now()
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO project_mappings (
+                    alias, name, project_id, account, state, last_verified_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(alias) DO UPDATE SET
+                    name = excluded.name,
+                    project_id = excluded.project_id,
+                    account = excluded.account,
+                    state = excluded.state,
+                    last_verified_at = excluded.last_verified_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    mapping.alias,
+                    mapping.name,
+                    mapping.project_id,
+                    mapping.account,
+                    mapping.state,
+                    mapping.last_verified_at,
+                    now,
+                    now,
+                ),
+            )
+
+    def list_projects(self) -> list[ProjectMapping]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM project_mappings ORDER BY name COLLATE NOCASE ASC"
+            ).fetchall()
+        return [self._project_row(row) for row in rows]
+
+    def resolve_project(self, reference: str) -> ProjectMapping | None:
+        normalized = normalize_project_alias(reference)
+        with self._connect() as db:
+            row = db.execute(
+                """
+                SELECT * FROM project_mappings
+                WHERE alias = ? COLLATE NOCASE
+                   OR name = ? COLLATE NOCASE
+                   OR project_id = ?
+                LIMIT 1
+                """,
+                (normalized, reference.strip(), reference.strip()),
+            ).fetchone()
+        return self._project_row(row) if row is not None else None
+
+    def delete_project(self, reference: str) -> bool:
+        normalized = normalize_project_alias(reference)
+        with self._connect() as db:
+            cursor = db.execute(
+                "DELETE FROM project_mappings WHERE alias = ? COLLATE NOCASE OR project_id = ?",
+                (normalized, reference.strip()),
+            )
+            return cursor.rowcount > 0
+
     def _artifact_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "file_id": row["file_id"],
@@ -231,6 +307,16 @@ class BridgeAdminStore:
             "checks": _json_or_empty(row["checks_json"]),
             "updated_at": row["updated_at"],
         }
+
+    def _project_row(self, row: sqlite3.Row) -> ProjectMapping:
+        return ProjectMapping(
+            alias=row["alias"],
+            name=row["name"],
+            project_id=row["project_id"],
+            account=row["account"],
+            state=row["state"],
+            last_verified_at=row["last_verified_at"],
+        )
 
 
 def _json_or_empty(value: str | None) -> Any:

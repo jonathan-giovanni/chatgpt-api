@@ -62,6 +62,11 @@ from chatgpt_api.providers.chatgpt.crypto import encrypt_text, load_secrets_key
 from chatgpt_api.providers.chatgpt.provider import ChatGPTProvider
 from chatgpt_api.providers.chatgpt.request_capture import CapturedRequest, SECRET_HEADER_NAMES
 from chatgpt_api.providers.chatgpt.models import build_model_capabilities, resolve_model_alias
+from chatgpt_api.providers.chatgpt.projects import (
+    ProjectMapping,
+    project_context,
+    validate_project_mapping,
+)
 from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport
 
 
@@ -909,6 +914,9 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             if path == "/v1/chatgpt/admin/settings":
                 _send_json(self, 200, {"object": "chatgpt.admin.settings", "settings": _bridge_settings(config)})
                 return
+            if path == "/v1/chatgpt/admin/projects":
+                _send_json(self, 200, _admin_projects_response(config))
+                return
             operation_id = _operation_id_from_path(path)
             if operation_id:
                 status, payload = _get_chatgpt_operation(operation_id)
@@ -940,6 +948,11 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
                 return
             try:
                 body = _read_json_body(self)
+                if path == "/v1/chat/completions":
+                    header_project = _str_or_none(self.headers.get("X-ChatGPT-Project"))
+                    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+                    if header_project and not body.get("chatgpt_project") and not metadata.get("chatgpt_project"):
+                        body["chatgpt_project"] = header_project
                 if path == "/v1/chat/completions" and body.get("stream"):
                     asyncio.run(_chat_completion_stream(config, body, router, self))
                     return
@@ -969,6 +982,23 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
 
 
 async def _chat_completion(
+    config: OpenAICompatConfig,
+    body: dict[str, Any],
+    router: AccountRouter | None = None,
+) -> dict[str, Any]:
+    mapping = _resolve_project_request(config, body)
+    with project_context(mapping.project_id if mapping else None):
+        response = await _chat_completion_with_project(config, body, router)
+    if mapping:
+        response["chatgpt_project"] = {
+            "alias": mapping.alias,
+            "name": mapping.name,
+            "account": mapping.account,
+        }
+    return response
+
+
+async def _chat_completion_with_project(
     config: OpenAICompatConfig,
     body: dict[str, Any],
     router: AccountRouter | None = None,
@@ -1186,6 +1216,18 @@ async def _chat_completion_stream(
     router: AccountRouter,
     handler: BaseHTTPRequestHandler,
 ) -> None:
+    mapping = _resolve_project_request(config, body)
+    with project_context(mapping.project_id if mapping else None):
+        await _chat_completion_stream_with_project(config, body, router, handler, mapping)
+
+
+async def _chat_completion_stream_with_project(
+    config: OpenAICompatConfig,
+    body: dict[str, Any],
+    router: AccountRouter,
+    handler: BaseHTTPRequestHandler,
+    project: ProjectMapping | None = None,
+) -> None:
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
@@ -1226,6 +1268,12 @@ async def _chat_completion_stream(
         "model": requested_model,
         "chatgpt_operation_id": operation.operation_id,
     }
+    if project:
+        chunk_base["chatgpt_project"] = {
+            "alias": project.alias,
+            "name": project.name,
+            "account": project.account,
+        }
 
     try:
         _send_sse_headers(handler, {"X-ChatGPT-Operation-Id": operation.operation_id})
@@ -2463,12 +2511,74 @@ def _admin_opencode_status(config: OpenAICompatConfig) -> dict[str, Any]:
     }
 
 
+def _admin_projects_response(config: OpenAICompatConfig) -> dict[str, Any]:
+    projects = [mapping.public_dict() for mapping in _admin_store(config).list_projects()]
+    return {
+        "object": "chatgpt.project.list",
+        "data": projects,
+        "selection": {
+            "body": "chatgpt_project",
+            "header": "X-ChatGPT-Project",
+            "optional": True,
+            "omitted_behavior": "primary_assistant",
+        },
+    }
+
+
+def _admin_project_save_payload(config: OpenAICompatConfig, body: dict[str, Any]) -> dict[str, Any]:
+    name = _str_or_none(body.get("name")) or ""
+    alias = _str_or_none(body.get("alias")) or name
+    project_id = _str_or_none(body.get("project_id")) or ""
+    account = _safe_account_name(_str_or_none(body.get("account")) or "")
+    mapping = validate_project_mapping(alias, name, project_id, account)
+    _admin_store(config).upsert_project(mapping)
+    return {"ok": True, "object": "chatgpt.project", "project": mapping.public_dict()}
+
+
+def _admin_project_delete_payload(config: OpenAICompatConfig, body: dict[str, Any]) -> dict[str, Any]:
+    reference = _str_or_none(body.get("project")) or _str_or_none(body.get("alias"))
+    if not reference:
+        raise ValueError("project is required")
+    deleted = _admin_store(config).delete_project(reference)
+    return {"ok": True, "deleted": deleted, "project": reference}
+
+
+def _project_reference_from_body(body: dict[str, Any]) -> str | None:
+    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    return _str_or_none(body.get("chatgpt_project")) or _str_or_none(metadata.get("chatgpt_project"))
+
+
+def _resolve_project_request(config: OpenAICompatConfig, body: dict[str, Any]) -> ProjectMapping | None:
+    reference = _project_reference_from_body(body)
+    if not reference:
+        return None
+    mapping = _admin_store(config).resolve_project(reference)
+    if mapping is None:
+        raise ValueError(f"unknown ChatGPT Project: {reference}")
+    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    explicit_account = _str_or_none(body.get("chatgpt_account")) or _str_or_none(
+        metadata.get("chatgpt_account")
+    )
+    if explicit_account and explicit_account != mapping.account:
+        raise ValueError(
+            f"ChatGPT Project {mapping.name} belongs to account {mapping.account}, not {explicit_account}"
+        )
+    if body.get("chatgpt_accounts") is not None or metadata.get("chatgpt_accounts") is not None:
+        raise ValueError("chatgpt_accounts cannot be combined with chatgpt_project")
+    body["chatgpt_account"] = mapping.account
+    return mapping
+
+
 async def _admin_post_response(
     config: OpenAICompatConfig,
     router: AccountRouter,
     path: str,
     body: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
+    if path == "/v1/chatgpt/admin/projects/save":
+        return 200, _admin_project_save_payload(config, body)
+    if path == "/v1/chatgpt/admin/projects/delete":
+        return 200, _admin_project_delete_payload(config, body)
     if path == "/v1/chatgpt/admin/captures/inspect":
         return 200, _inspect_account_capture_payload(config, body)
     if path == "/v1/chatgpt/admin/captures/save":
@@ -2491,14 +2601,18 @@ async def _admin_post_response(
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
+        test_body = {
+            "model": _str_or_none(body.get("model")) or "auto",
+            "messages": messages,
+            "stream": False,
+            "metadata": {"source": "bridge_console_test_chat"},
+        }
+        project_reference = _str_or_none(body.get("chatgpt_project"))
+        if project_reference:
+            test_body["chatgpt_project"] = project_reference
         response = await _chat_completion(
             config,
-            {
-                "model": _str_or_none(body.get("model")) or "auto",
-                "messages": messages,
-                "stream": False,
-                "metadata": {"source": "bridge_console_test_chat"},
-            },
+            test_body,
             router,
         )
         content = _completion_text_from_response(response)
@@ -4411,7 +4525,8 @@ def _models_for_account(config: OpenAICompatConfig, account: str | None = None) 
     capture = CapturedRequest.from_file(capture_path)
     settings_path = resolve_account_settings_path(selected_account, config.accounts_dir)
     settings = load_settings_file(str(settings_path)) if settings_path.exists() else {}
-    capabilities = infer_account_capabilities(detect_account_info(capture, settings))
+    info = detect_account_info(capture, settings)
+    capabilities = infer_account_capabilities(info)
 
     normalized = build_model_capabilities(
         capabilities["supported_models"],
@@ -4486,6 +4601,8 @@ def _resolve_agent_prompt_mode(config: OpenAICompatConfig, body: dict[str, Any],
 
 
 def _resolve_temporary_chat_mode(config: OpenAICompatConfig, body: dict[str, Any]) -> bool:
+    if _project_reference_from_body(body):
+        return False
     if _request_is_deep_research(body, _str_or_none(body.get("model")) or ""):
         return False
     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
