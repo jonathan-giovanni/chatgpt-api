@@ -215,6 +215,33 @@ def test_build_next_payload_uses_capture_template_without_reusing_thread_ids():
     assert "conversation_id" not in payload
 
 
+def test_build_next_payload_does_not_inherit_project_from_capture_template():
+    auth = ChatGPTAuthConfig(
+        access_token="fake",
+        captured_request_json={
+            "conversation_mode": {
+                "kind": "gizmo_interaction",
+                "gizmo_id": "g-p-capturedprivateproject00000000",
+            }
+        },
+    )
+    transport = ChatGPTWebTransport(auth)
+
+    normal = transport.build_chat_payload(ChatRequest(messages=[Message.text("user", "normal")]))
+    project = transport.build_chat_payload(
+        ChatRequest(
+            messages=[Message.text("user", "project")],
+            metadata={"chatgpt_project_id": "g-p-0123456789abcdef0123456789abcdef"},
+        )
+    )
+
+    assert normal["conversation_mode"] == {"kind": "primary_assistant"}
+    assert project["conversation_mode"] == {
+        "kind": "gizmo_interaction",
+        "gizmo_id": "g-p-0123456789abcdef0123456789abcdef",
+    }
+
+
 def test_build_next_payload_prefers_local_timezone_over_capture_template(monkeypatch):
     import chatgpt_api.providers.chatgpt.transport as transport_module
 

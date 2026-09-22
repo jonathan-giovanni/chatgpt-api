@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
+
+
+EFFORT_SUFFIX = re.compile(
+    r"^(?P<model>gpt-[a-z0-9-]+-(?:thinking|pro))-(?P<effort>standard|extended|max)$"
+)
+VERSION_PART = re.compile(r"^gpt-(?P<major>\d+)-(?P<minor>\d+)(?P<suffix>.*)$")
+LEGACY_MODEL_PREFIXES = ("gpt-5-5",)
 
 
 @dataclass(slots=True)
@@ -60,6 +68,32 @@ class ModelPicker:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ModelCapability:
+    """Normalized public model entry backed by capture-derived evidence."""
+
+    id: str
+    provider_model: str
+    name: str
+    mode: str
+    source: str
+    thinking_effort: str | None = None
+    status: str = "active"
+    replacement: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "provider_model": self.provider_model,
+            "name": self.name,
+            "mode": self.mode,
+            "source": self.source,
+            "thinking_effort": self.thinking_effort,
+            "status": self.status,
+            "replacement": self.replacement,
+        }
+
+
 def parse_model_picker(payload: dict[str, Any]) -> ModelPicker:
     models = payload.get("models")
     versions = payload.get("versions")
@@ -76,6 +110,95 @@ def presets_for_version(picker: ModelPicker, version_id: str) -> list[Intelligen
         if version.id == version_id:
             return version.presets
     return []
+
+
+def build_model_capabilities(
+    model_slugs: list[str],
+    *,
+    model_efforts: dict[str, list[str]] | None = None,
+    observed_models: list[str] | None = None,
+) -> list[ModelCapability]:
+    """Build public aliases from models observed or conservatively supported."""
+
+    efforts = model_efforts or {}
+    observed = set(observed_models or [])
+    result = [
+        ModelCapability(
+            id="auto",
+            provider_model="auto",
+            name="ChatGPT Auto",
+            mode="auto",
+            source="bridge",
+        )
+    ]
+    seen = {"auto"}
+    for slug in model_slugs:
+        if not isinstance(slug, str) or not slug or slug == "auto":
+            continue
+        variants = _model_variants(slug, efforts.get(slug, []))
+        for public_id, effort in variants:
+            if public_id in seen:
+                continue
+            seen.add(public_id)
+            deprecated = slug.startswith(LEGACY_MODEL_PREFIXES)
+            result.append(
+                ModelCapability(
+                    id=public_id,
+                    provider_model=slug,
+                    name=_model_display_name(slug, effort),
+                    mode=_model_mode(slug),
+                    source="observed" if slug in observed else "compatibility",
+                    thinking_effort=effort,
+                    status="deprecated" if deprecated else "active",
+                    replacement="auto" if deprecated else None,
+                )
+            )
+    return result
+
+
+def resolve_model_alias(model: str, explicit_effort: str | None) -> tuple[str, str | None]:
+    """Resolve a public effort alias without pinning the current model family."""
+
+    if model == "auto":
+        return "auto", None
+    matched = EFFORT_SUFFIX.fullmatch(model)
+    if matched:
+        return matched.group("model"), matched.group("effort")
+    return model, explicit_effort
+
+
+def _model_variants(slug: str, efforts: list[str]) -> list[tuple[str, str | None]]:
+    normalized_efforts = [effort for effort in efforts if effort in {"standard", "extended", "max"}]
+    if _model_mode(slug) in {"thinking", "pro"} and normalized_efforts:
+        return [(f"{slug}-{effort}", effort) for effort in dict.fromkeys(normalized_efforts)]
+    return [(slug, None)]
+
+
+def _model_mode(slug: str) -> str:
+    for mode in ("instant", "thinking", "pro"):
+        if slug.endswith(f"-{mode}"):
+            return mode
+    return "standard"
+
+
+def _model_display_name(slug: str, effort: str | None) -> str:
+    matched = VERSION_PART.match(slug)
+    if not matched:
+        base = slug
+    else:
+        base = f"GPT-{matched.group('major')}.{matched.group('minor')}"
+    mode = _model_mode(slug)
+    labels = {
+        "instant": "Instant",
+        "thinking": "Thinking",
+        "pro": "Pro",
+    }
+    parts = [base]
+    if mode in labels:
+        parts.append(labels[mode])
+    if effort:
+        parts.append({"standard": "Medium", "extended": "High", "max": "Extra High"}[effort])
+    return " ".join(parts)
 
 
 def _versions_from_payload(values: list[Any]) -> list[ModelVersion]:

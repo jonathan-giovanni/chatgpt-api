@@ -8,6 +8,11 @@ The Compose stack runs three services:
 
 Images do not bundle your ChatGPT account captures. Mount them from the host.
 
+Compose publishes these ports on `127.0.0.1` by default. Set
+`CHATGPT_BIND_HOST=0.0.0.0` explicitly for LAN access, together with a strong
+`CHATGPT_API_KEY` and the appropriate `CHATGPT_PUBLIC_BASE_URL`.
+For the prepared Windows development environment, see [LOCAL_SETUP.md](LOCAL_SETUP.md).
+
 ## Files
 
 Expected host layout:

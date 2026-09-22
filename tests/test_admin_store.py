@@ -1,4 +1,5 @@
 from chatgpt_api.api.admin_store import BridgeAdminStore
+from chatgpt_api.providers.chatgpt.projects import ProjectMapping
 
 
 def test_artifacts_hide_missing_files(tmp_path):
@@ -35,3 +36,22 @@ def test_artifacts_hide_missing_files(tmp_path):
     assert [artifact["file_id"] for artifact in artifacts] == ["live"]
     assert store.artifact_count() == 1
     assert store.delete_artifact("missing") is None
+
+
+def test_project_mappings_resolve_name_alias_and_id(tmp_path):
+    store = BridgeAdminStore(tmp_path / "admin.sqlite")
+    mapping = ProjectMapping(
+        alias="support",
+        name="Support",
+        project_id="g-p-0123456789abcdef0123456789abcdef",
+        account="plus-work",
+    )
+
+    store.upsert_project(mapping)
+
+    assert store.resolve_project("Support") == mapping
+    assert store.resolve_project("support") == mapping
+    assert store.resolve_project(mapping.project_id) == mapping
+    assert store.list_projects() == [mapping]
+    assert store.delete_project("Support") is True
+    assert store.resolve_project("support") is None

@@ -151,6 +151,26 @@ def test_infer_account_capabilities_hides_auto_alias_for_free():
     assert capabilities["extra_observed_models"] == []
 
 
+def test_infer_account_capabilities_includes_observed_current_model_family():
+    info = detect_account_info(
+        CapturedRequest(
+            request_json={
+                "action": "next",
+                "model": "gpt-5-6-thinking",
+                "thinking_effort": "extended",
+            }
+        )
+    )
+    info.plan_type = "plus"
+    info.plan_bucket = "paid"
+
+    capabilities = infer_account_capabilities(info)
+
+    assert "gpt-5-6-thinking" in capabilities["supported_models"]
+    assert capabilities["model_efforts"]["gpt-5-6-thinking"] == ["extended"]
+    assert "gpt-5-6-thinking" not in capabilities["extra_observed_models"]
+
+
 def test_load_settings_file(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text('{"settings":{"wingman_thinking_effort":"instant"}}', encoding="utf-8")

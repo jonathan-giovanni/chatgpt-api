@@ -592,3 +592,19 @@ as `chatgpt_default_model_slug`, `chatgpt_model_limit`,
 `chatgpt_blocked_features`, and `chatgpt_limits_progress`.
 
 Keep this document honest as behavior changes.
+
+## Registro dinámico y migración
+
+`GET /v1/models` se construye a partir de las capturas locales. `auto` es el
+valor recomendado: deja que ChatGPT resuelva el modelo disponible para la
+cuenta. Los slugs observados se publican con su familia real y, cuando procede,
+con aliases de esfuerzo como `-standard`, `-extended` y `-max`.
+
+Cada modelo incluye metadatos `chatgpt`: `provider_model`, `mode`,
+`thinking_effort`, `source`, `status` y `replacement`. La cuenta Plus local
+confirmó `gpt-5-6-thinking` con esfuerzo `extended`. La familia histórica
+`gpt-5-5*` se conserva para clientes existentes, marcada como deprecated y con
+`auto` como migración. La ausencia de un slug en una captura no demuestra que
+ChatGPT lo haya retirado globalmente; indica que el bridge no debe prometerlo
+para esa cuenta. Si una petición omite `model`, el bridge usa `auto`.
+

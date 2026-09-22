@@ -27,7 +27,7 @@ services:
       CHATGPT_CONSOLE_URL: ${CHATGPT_CONSOLE_URL:-http://127.0.0.1:8080}
       CHATGPT_CONSOLE_COMMAND: ${CHATGPT_CONSOLE_COMMAND:-docker compose up -d bridge-console}
     ports:
-      - "${CHATGPT_API_PORT:-8000}:8000"
+      - "${CHATGPT_BIND_HOST:-127.0.0.1}:${CHATGPT_API_PORT:-8000}:8000"
     volumes:
       - ./secrets/accounts:/data/secrets/accounts
       - ./outputs:/data/outputs
@@ -40,7 +40,7 @@ services:
     depends_on:
       - chatgpt-api
     ports:
-      - "${BRIDGE_CONSOLE_PORT:-8080}:80"
+      - "${CHATGPT_BIND_HOST:-127.0.0.1}:${BRIDGE_CONSOLE_PORT:-8080}:80"
     restart: unless-stopped
 
   character-game:
@@ -61,7 +61,7 @@ services:
       CHATGAME_DB_PATH: /data/chatgame.sqlite
       CHATGAME_IMAGE_DIR: /data/images
     ports:
-      - "${CHARACTER_GAME_PORT:-3000}:3000"
+      - "${CHATGPT_BIND_HOST:-127.0.0.1}:${CHARACTER_GAME_PORT:-3000}:3000"
     volumes:
       - ./outputs/character-game:/data
     restart: unless-stopped

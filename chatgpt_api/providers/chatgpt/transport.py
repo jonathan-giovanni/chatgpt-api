@@ -21,6 +21,7 @@ from chatgpt_api.core.errors import ProviderError, ProviderNotConfigured, Provid
 from chatgpt_api.core.types import ChatDelta, ChatRequest, ImageAsset, ImageInput, ImageRequest, ImageResponse
 from chatgpt_api.providers.chatgpt.auth import ChatGPTAuthConfig
 from chatgpt_api.providers.chatgpt.proof import decode_proof_config, generate_proof_token
+from chatgpt_api.providers.chatgpt.projects import conversation_mode, current_project_id
 from chatgpt_api.providers.chatgpt.timezone import local_timezone_payload
 
 MAX_CHATGPT_INPUT_IMAGES = 10
@@ -116,7 +117,11 @@ class ChatGPTWebTransport:
             "model": request.model or str(template.get("model") or "auto"),
             "timezone_offset_min": timezone_payload["timezone_offset_min"],
             "timezone": timezone_payload["timezone"],
-            "conversation_mode": template.get("conversation_mode", {"kind": "primary_assistant"}),
+            "conversation_mode": conversation_mode(
+                request.metadata.get("chatgpt_project_id")
+                if isinstance(request.metadata.get("chatgpt_project_id"), str)
+                else current_project_id()
+            ),
             "system_hints": system_hints,
             "supports_buffering": template.get("supports_buffering", True),
             "supported_encodings": template.get("supported_encodings", ["v1"]),
@@ -351,7 +356,7 @@ class ChatGPTWebTransport:
             "client_prepare_state": "success",
             "timezone_offset_min": timezone_payload["timezone_offset_min"],
             "timezone": timezone_payload["timezone"],
-            "conversation_mode": template.get("conversation_mode", {"kind": "primary_assistant"}),
+            "conversation_mode": {"kind": "primary_assistant"},
             "enable_message_followups": template.get("enable_message_followups", True),
             "system_hints": system_hints,
             "supports_buffering": template.get("supports_buffering", True),
