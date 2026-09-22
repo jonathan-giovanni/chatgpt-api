@@ -706,6 +706,8 @@
   let newCaptureText = $state("");
   let newCaptureResult = $state<Json | null>(null);
   let selectedChatProject = $state("");
+  let chatFiles = $state<File[]>([]);
+  let chatFilesError = $state("");
   let projectName = $state("");
   let projectAlias = $state("");
   let projectId = $state("");
@@ -1268,18 +1270,48 @@
   async function runChat() {
     await runTask("chat-test", async () => {
       chatResult = "Running...";
-      const payload = await apiFetch("/chatgpt/admin/test/chat", {
+      const attachments = await Promise.all(chatFiles.map(async (file) => {
+        const data = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result).split(",")[1]);
+          reader.onerror = () => reject(new Error("No se pudo leer el archivo"));
+          reader.readAsDataURL(file);
+        });
+        const format = file.name.split(".").pop()?.toLowerCase();
+        return format === "wav" || format === "mp3"
+          ? { type: "input_audio", input_audio: { data, format } }
+          : { type: "file", file: { filename: file.name, file_data: data } };
+      }));
+      const started = performance.now();
+      const payload = await apiFetch("/chat/completions", {
         method: "POST",
         body: JSON.stringify({
           model: chatModel || "auto",
-          message: chatPrompt,
+          messages: [{ role: "user", content: [{ type: "text", text: chatPrompt }, ...attachments] }],
+          stream: false,
           ...(selectedChatProject
             ? { chatgpt_project: selectedChatProject }
             : {}),
         }),
       });
-      chatResult = `${payload.latency_ms}ms\n\n${payload.content || JSON.stringify(payload.response, null, 2)}`;
+      chatResult = `${Math.round(performance.now() - started)}ms\n\n${payload.choices?.[0]?.message?.content || JSON.stringify(payload, null, 2)}`;
     });
+  }
+
+  function selectChatFiles(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files || []);
+    chatFilesError = files.length > 10
+      ? "Máximo 10 archivos."
+      : files.some((file) => !/\.(txt|md|csv|json|wav|mp3)$/i.test(file.name))
+        ? "Formatos admitidos: TXT, MD, CSV, JSON, WAV y MP3."
+        : files.some((file) => !file.size || file.size > 20 * 1024 * 1024)
+          ? "Cada archivo debe ocupar entre 1 byte y 20 MiB."
+          : files.reduce((total, file) => total + file.size, 0) > 25 * 1024 * 1024
+            ? "El total supera 25 MiB."
+            : "";
+    chatFiles = chatFilesError ? [] : files;
+    input.value = "";
   }
 
   async function runContextChat() {
@@ -3841,13 +3873,31 @@
             </label>
             <Input label="Model" bind:value={chatModel} />
             <Textarea label="Message" bind:value={chatPrompt} rows={5} />
+            <label class="mt-4 block text-sm font-bold text-slate-300">
+              Adjuntar audio o texto
+              <input class="mt-2 block w-full text-sm" type="file" multiple accept=".txt,.md,.csv,.json,.wav,.mp3" onchange={selectChatFiles} />
+            </label>
+            <p class="mt-2 text-xs text-slate-400">
+              TXT, MD, CSV y JSON en UTF-8; audio WAV o MP3 como archivo adjunto.
+              Máximo 10 archivos, 20 MiB por archivo y 25 MiB en total.
+              Cada envío crea una conversación nueva en el Project seleccionado.
+              El análisis de audio depende del modelo; no es el modo Voz.
+            </p>
+            {#if chatFilesError}<p role="alert" class="mt-2 text-sm text-rose-300">{chatFilesError}</p>{/if}
+            {#each chatFiles as file, index}
+              <div class="mt-2 flex items-center justify-between gap-2 text-sm text-slate-300">
+                <span class="break-all">{file.name} · {Math.ceil(file.size / 1024)} KiB</span>
+                <button class="text-rose-300" aria-label={`Quitar ${file.name}`} onclick={() => chatFiles = chatFiles.filter((_, i) => i !== index)}>Quitar</button>
+              </div>
+            {/each}
             <button
               class="mt-4 rounded-2xl bg-sky-300 px-4 py-3 font-black text-slate-950"
               onclick={runChat}
+              disabled={Boolean(busy) || Boolean(chatFilesError)}
             >
               Run chat
             </button>
-            <CodeBlock title="curl" code={chatCurl} />
+            {#if chatFiles.length === 0}<CodeBlock title="curl" code={chatCurl} />{/if}
             <pre
               class="mt-4 min-h-40 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-white/10 bg-slate-950 p-4 text-sm text-slate-300">{chatResult}</pre>
           </article>

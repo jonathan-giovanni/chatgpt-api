@@ -211,6 +211,73 @@ data: {"object":"chat.completion.chunk","choices":[{"delta":{},"finish_reason":"
 data: [DONE]
 ```
 
+### Text and audio attachments
+
+`POST /v1/chat/completions` accepts inline text files and audio in a new user
+conversation. The bridge uploads each attachment to ChatGPT and keeps the
+normal optional `chatgpt_project` routing field.
+
+Supported inputs:
+
+- text: UTF-8 `.txt`, `.md`, `.csv`, and `.json`
+- audio: WAV and MP3 through an `input_audio` content part
+- data: raw base64 or a matching `data:<mime>;base64,...` URL
+
+The bridge accepts at most 10 attachments, 20 MiB per attachment, and 25 MiB
+combined. These are conservative bridge limits. Inline `file_id` references,
+continuations, Deep Research, tools, and agent mode are rejected for requests
+with files so an attachment is never silently discarded.
+
+Text-file request:
+
+```json
+{
+  "model": "auto",
+  "chatgpt_project": "INCIDENCIAS",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Summarize the attached notes."},
+        {
+          "type": "file",
+          "file": {
+            "filename": "notes.txt",
+            "file_data": "SGVsbG8gZnJvbSB0aGUgYnJpZGdlLg=="
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Audio request:
+
+```json
+{
+  "model": "auto",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Transcribe this audio."},
+        {
+          "type": "input_audio",
+          "input_audio": {
+            "format": "wav",
+            "data": "<base64 WAV bytes>"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+The selected ChatGPT model determines how it analyzes or transcribes the
+uploaded audio. This route does not implement realtime voice or text-to-speech.
+
 Tool calling uses the same route. The bridge asks ChatGPT to emit strict JSON,
 validates the requested tool names, and returns OpenAI-style `tool_calls` for
 the client to execute. The server never executes tools itself.

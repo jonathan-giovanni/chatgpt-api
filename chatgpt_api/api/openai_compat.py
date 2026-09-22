@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from chatgpt_api.api.admin_store import BridgeAdminStore
 from chatgpt_api.api.config import OpenAICompatConfig
+from chatgpt_api.api.file_inputs import file_content_part, validate_file_parts
 from chatgpt_api.api.http_utils import (
     authorize as _authorize,
     cancel_operation_id_from_path as _cancel_operation_id_from_path,
@@ -763,10 +764,10 @@ def _usage_preflight_rank(
     return (0, score)
 
 
-def _upload_usage_requirements(input_image_count: int) -> tuple[tuple[tuple[str, ...], int], ...]:
-    if input_image_count <= 0:
+def _upload_usage_requirements(input_attachment_count: int) -> tuple[tuple[tuple[str, ...], int], ...]:
+    if input_attachment_count <= 0:
         return ()
-    return ((USAGE_FEATURE_ALIASES["file_upload"], input_image_count),)
+    return ((USAGE_FEATURE_ALIASES["file_upload"], input_attachment_count),)
 
 
 def _image_usage_requirements(input_image_count: int) -> tuple[tuple[tuple[str, ...], int], ...]:
@@ -1016,10 +1017,11 @@ async def _chat_completion_with_project(
     local_command_response = await _maybe_handle_local_chatgpt_command(config, messages, requested_model, router)
     if local_command_response is not None:
         return local_command_response
-    image_response = await _maybe_handle_chat_image_request(config, body, messages, requested_model, router)
+    has_files = _validate_file_request(body, messages, tools, model_agent_mode)
+    image_response = None if has_files else await _maybe_handle_chat_image_request(config, body, messages, requested_model, router)
     if image_response is not None:
         return image_response
-    deep_research_response = await _maybe_handle_deep_research_request(
+    deep_research_response = None if has_files else await _maybe_handle_deep_research_request(
         config,
         body,
         messages,
@@ -1243,11 +1245,12 @@ async def _chat_completion_stream_with_project(
     if local_command_response is not None:
         _send_sse_completion(handler, local_command_response)
         return
-    image_response = await _maybe_handle_chat_image_request(config, body, messages, requested_model, router)
+    has_files = _validate_file_request(body, messages, tools, model_agent_mode)
+    image_response = None if has_files else await _maybe_handle_chat_image_request(config, body, messages, requested_model, router)
     if image_response is not None:
         _send_sse_completion(handler, image_response)
         return
-    deep_research_response = await _maybe_handle_deep_research_request(
+    deep_research_response = None if has_files else await _maybe_handle_deep_research_request(
         config,
         body,
         messages,
@@ -1382,7 +1385,7 @@ async def _stream_messages_text_with_accounts(
     on_conversation_id: Any | None = None,
 ) -> tuple[str, ChatGPTProvider, str]:
     provider_messages = _openai_messages_to_provider_messages(messages)
-    input_image_count = _provider_message_image_count(provider_messages)
+    input_attachment_count = _provider_message_attachment_count(provider_messages)
     attempts: list[dict[str, Any]] = []
     last_error: OpenAICompatProviderError | None = None
     for account, preflight_metadata in await _account_order_with_usage_preflight(
@@ -1390,14 +1393,14 @@ async def _stream_messages_text_with_accounts(
         router,
         model_slug,
         thinking_effort,
-        _upload_usage_requirements(input_image_count),
+        _upload_usage_requirements(input_attachment_count),
     ):
         provider = _provider_for_account(config, account)
         init_metadata = preflight_metadata
-        if input_image_count:
+        if input_attachment_count:
             if init_metadata is None:
                 init_metadata = await _conversation_init_metadata(provider, model_slug)
-            preflight_error = _input_upload_preflight_error(init_metadata, input_image_count)
+            preflight_error = _input_upload_preflight_error(init_metadata, input_attachment_count)
             if preflight_error is not None:
                 compat_error = OpenAICompatProviderError(
                     preflight_error,
@@ -1444,7 +1447,7 @@ async def _stream_messages_text_with_accounts(
                         raise
 
         try:
-            features = ("upload", "chat") if input_image_count else ("chat",)
+            features = ("upload", "chat") if input_attachment_count else ("chat",)
             await _with_provider_feature_limits(
                 config,
                 provider,
@@ -3119,6 +3122,25 @@ def _content_disposition(filename: str) -> str:
     return f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
 
 
+def _validate_file_request(body: dict[str, Any], messages: list[Any], tools: list[Any], model_agent_mode: str | None) -> bool:
+    has_files = any(
+        isinstance(item, dict) and item.get("type") in {"file", "input_audio"}
+        for message in messages if isinstance(message, dict)
+        for item in (message.get("content") if isinstance(message.get("content"), list) else [])
+    )
+    if not has_files:
+        return False
+    if _should_use_agent_bridge(body, tools, model_agent_mode):
+        raise ValueError("file uploads cannot be combined with tools or agent mode")
+    if body.get("model") in DEEP_RESEARCH_MODEL_ALIASES:
+        raise ValueError("file uploads are supported for ordinary chat only")
+    if body.get("conversation_id") or body.get("parent_message_id") or body.get("action", "next") != "next":
+        raise ValueError("file uploads require a new conversation")
+    # Validate before SSE headers or provider calls, never silently discard files.
+    _openai_messages_to_provider_messages(messages)
+    return True
+
+
 def _should_use_agent_bridge(body: dict[str, Any], tools: list[Any], model_agent_mode: str | None) -> bool:
     if tools:
         return True
@@ -3153,20 +3175,20 @@ async def _collect_messages_text_with_accounts(
     attempts: list[dict[str, Any]] = []
     last_error: OpenAICompatProviderError | None = None
     provider_messages = _openai_messages_to_provider_messages(messages)
-    input_image_count = _provider_message_image_count(provider_messages)
+    input_attachment_count = _provider_message_attachment_count(provider_messages)
     for account, preflight_metadata in await _account_order_with_usage_preflight(
         config,
         router,
         model_slug,
         thinking_effort,
-        _upload_usage_requirements(input_image_count),
+        _upload_usage_requirements(input_attachment_count),
     ):
         provider = _provider_for_account(config, account)
         init_metadata = preflight_metadata
-        if input_image_count:
+        if input_attachment_count:
             if init_metadata is None:
                 init_metadata = await _conversation_init_metadata(provider, model_slug)
-            preflight_error = _input_upload_preflight_error(init_metadata, input_image_count)
+            preflight_error = _input_upload_preflight_error(init_metadata, input_attachment_count)
             if preflight_error is not None:
                 compat_error = OpenAICompatProviderError(
                     preflight_error,
@@ -3183,7 +3205,7 @@ async def _collect_messages_text_with_accounts(
                 raise compat_error from preflight_error
         try:
             _update_chatgpt_operation(operation_id, account=account, provider=provider)
-            features = ("upload", "chat") if input_image_count else ("chat",)
+            features = ("upload", "chat") if input_attachment_count else ("chat",)
             text = await _with_provider_feature_limits(
                 config,
                 provider,
@@ -3260,7 +3282,8 @@ def _openai_messages_to_provider_messages(messages: list[Any]) -> list[Message]:
         if parts:
             provider_messages.append(Message(role=role, content=parts))  # type: ignore[arg-type]
     if not provider_messages:
-        raise ValueError("messages must contain at least one text or image message")
+        raise ValueError("messages must contain at least one text, image, or file message")
+    validate_file_parts(provider_messages)
     return provider_messages
 
 
@@ -3281,6 +3304,8 @@ def _openai_content_to_provider_parts(content: Any) -> list[ContentPart]:
             item_type = item.get("type")
             if item_type in {"text", "input_text"} and isinstance(item.get("text"), str):
                 parts.append(ContentPart.text_part(item["text"]))
+            elif item_type in {"file", "input_audio"}:
+                parts.append(file_content_part(item))
             elif item_type in {"image_url", "input_image"}:
                 image_url = item.get("image_url")
                 if isinstance(image_url, dict):
@@ -3522,14 +3547,17 @@ def _image_request_preflight_error(init_metadata: dict[str, Any] | None, input_i
     return None
 
 
-def _input_upload_preflight_error(init_metadata: dict[str, Any] | None, input_image_count: int) -> ProviderError | None:
-    if not isinstance(init_metadata, dict) or input_image_count <= 0:
+def _input_upload_preflight_error(
+    init_metadata: dict[str, Any] | None,
+    input_attachment_count: int,
+) -> ProviderError | None:
+    if not isinstance(init_metadata, dict) or input_attachment_count <= 0:
         return None
     return _feature_limit_error(
         init_metadata,
         USAGE_FEATURE_ALIASES["file_upload"],
         "ChatGPT file upload",
-        minimum_remaining=input_image_count,
+        minimum_remaining=input_attachment_count,
     )
 
 
@@ -3564,11 +3592,11 @@ def _feature_limit_error(
     )
 
 
-def _provider_message_image_count(messages: list[Message]) -> int:
+def _provider_message_attachment_count(messages: list[Message]) -> int:
     count = 0
     for message in messages:
         for part in message.content:
-            if part.kind in {"image_bytes", "image_url"}:
+            if part.kind in {"image_bytes", "image_url", "file_bytes"}:
                 count += 1
     return count
 
