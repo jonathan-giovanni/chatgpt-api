@@ -330,6 +330,55 @@ def test_build_chat_payload_uploads_image_bytes_for_multimodal_message(monkeypat
     assert message["metadata"]["attachments"][0]["id"] == "file_panel"
 
 
+def test_build_chat_payload_uploads_text_and_audio_as_attachments(monkeypatch):
+    transport = ChatGPTWebTransport(ChatGPTAuthConfig(access_token="fake"))
+    uploaded = []
+
+    def fake_upload(data, mime_type, file_name, headers):
+        uploaded.append((data, mime_type, file_name))
+        return {
+            "file_id": f"file_{len(uploaded)}",
+            "file_name": file_name,
+            "file_size": len(data),
+            "mime_type": mime_type,
+        }
+
+    monkeypatch.setattr(transport, "_upload_file", fake_upload)
+    payload = transport._build_chat_payload_with_uploaded_media(
+        ChatRequest(
+            messages=[
+                Message(
+                    role="user",
+                    content=[
+                        ContentPart.text_part("Compare these attachments"),
+                        ContentPart.file_bytes(b"hello", "text/plain", "notes.txt"),
+                        ContentPart.file_bytes(b"RIFF....WAVE", "audio/wav", "audio.wav"),
+                    ],
+                )
+            ],
+            model="auto",
+            metadata={"chatgpt_project_id": "g-p-0123456789abcdef0123456789abcdef"},
+        ),
+        {"authorization": "Bearer fake"},
+    )
+
+    assert uploaded == [
+        (b"hello", "text/plain", "notes.txt"),
+        (b"RIFF....WAVE", "audio/wav", "audio.wav"),
+    ]
+    assert payload["conversation_mode"] == {
+        "kind": "gizmo_interaction",
+        "gizmo_id": "g-p-0123456789abcdef0123456789abcdef",
+    }
+    assert "picture_v2" not in payload["system_hints"]
+    message = payload["messages"][0]
+    assert message["content"] == {"content_type": "text", "parts": ["Compare these attachments"]}
+    assert message["metadata"]["attachments"] == [
+        {"id": "file_1", "name": "notes.txt", "mimeType": "text/plain", "size": 5},
+        {"id": "file_2", "name": "audio.wav", "mimeType": "audio/wav", "size": 12},
+    ]
+
+
 def test_generate_image_accepts_multiple_input_images(monkeypatch):
     transport = ChatGPTWebTransport(ChatGPTAuthConfig(access_token="fake"))
     uploaded = []

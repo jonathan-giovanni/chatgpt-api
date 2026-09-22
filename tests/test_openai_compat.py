@@ -55,6 +55,70 @@ def test_resolve_model_alias_maps_intelligence_presets():
     assert _resolve_model_alias("auto", None) == ("auto", None)
 
 
+def test_openai_content_converts_inline_text_and_audio_files():
+    parts = compat._openai_content_to_provider_parts(
+        [
+            {"type": "text", "text": "Read and listen"},
+            {
+                "type": "file",
+                "file": {
+                    "filename": "notes.txt",
+                    "file_data": base64.b64encode(b"hello").decode("ascii"),
+                },
+            },
+            {
+                "type": "input_audio",
+                "input_audio": {
+                    "format": "wav",
+                    "data": base64.b64encode(b"RIFF\x00\x00\x00\x00WAVE").decode("ascii"),
+                },
+            },
+        ]
+    )
+
+    assert [(part.kind, part.mime_type, part.name) for part in parts] == [
+        ("text", None, None),
+        ("file_bytes", "text/plain", "notes.txt"),
+        ("file_bytes", "audio/wav", "audio.wav"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"messages": [], "tools": [{"type": "function"}]},
+        {"messages": [], "agent_mode": "optimized"},
+        {"messages": [], "model": "chatgpt-deep-research"},
+        {"messages": [], "conversation_id": "conversation-1"},
+        {"messages": [], "parent_message_id": "message-1"},
+        {"messages": [], "action": "continue"},
+    ],
+)
+def test_validate_file_request_rejects_incompatible_modes(body):
+    body["messages"] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": "notes.txt",
+                        "file_data": base64.b64encode(b"hello").decode("ascii"),
+                    },
+                }
+            ],
+        }
+    ]
+
+    with pytest.raises(ValueError):
+        compat._validate_file_request(
+            body,
+            body["messages"],
+            body.get("tools", []),
+            "optimized" if body.get("agent_mode") else None,
+        )
+
+
 def test_resolve_image_model_alias_maps_openai_names_to_auto():
     assert _resolve_image_model_alias("gpt-image-1") == "auto"
     assert _resolve_image_model_alias("chatgpt-image") == "auto"

@@ -85,7 +85,7 @@ class ChatGPTWebTransport:
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[ChatDelta]:
         self.ensure_configured()
         headers = self.auth.request_headers()
-        payload = self._build_chat_payload_with_uploaded_media(request, headers)
+        payload = await asyncio.to_thread(self._build_chat_payload_with_uploaded_media, request, headers)
         conversation_url = self.auth.captured_url or self.endpoints.conversation_url
         if self.refresh_web_tokens:
             headers = await asyncio.to_thread(self._refresh_web_tokens, headers, payload)
@@ -179,7 +179,7 @@ class ChatGPTWebTransport:
         timezone_payload = local_timezone_payload()
         _apply_latest_user_message_metadata(messages, _extra_user_message_metadata(request.metadata, timezone_payload))
         system_hints = list(payload.get("system_hints") or [])
-        if "picture_v2" not in system_hints:
+        if any(p.kind == "image_bytes" for m in request.messages for p in m.content) and "picture_v2" not in system_hints:
             system_hints.append("picture_v2")
         payload["system_hints"] = system_hints
         payload["messages"] = messages
@@ -188,7 +188,7 @@ class ChatGPTWebTransport:
     def _upload_message_media(self, message: Any, headers: dict[str, str]) -> list[dict[str, Any]]:
         uploaded_files: list[dict[str, Any]] = []
         for part in message.content:
-            if part.kind != "image_bytes" or not part.data:
+            if part.kind not in {"image_bytes", "file_bytes"} or not part.data:
                 continue
             uploaded_files.append(
                 self._upload_file(
@@ -378,7 +378,7 @@ class ChatGPTWebTransport:
         try:
             from curl_cffi import requests
         except ImportError as exc:
-            raise ProviderNotConfigured("curl_cffi is required for ChatGPT Web image upload") from exc
+            raise ProviderNotConfigured("curl_cffi is required for ChatGPT Web file upload") from exc
 
         extension = _extension_for_mime_type(mime_type)
         width, height = _image_dimensions(data)
@@ -1103,6 +1103,16 @@ def _message_to_chatgpt(message: Any, uploaded_files: list[dict[str, Any]] | Non
         elif part.kind == "image_url":
             has_media = True
             parts.append({"type": "image_url", "image_url": part.url, "mime_type": part.mime_type})
+        elif part.kind == "file_bytes":
+            file_data = next(uploaded_iter, {})
+            file_id = file_data.get("file_id")
+            if isinstance(file_id, str):
+                attachments.append({
+                    "id": file_id,
+                    "name": file_data.get("file_name"),
+                    "mimeType": file_data.get("mime_type"),
+                    "size": file_data.get("file_size"),
+                })
         elif part.kind == "image_bytes":
             has_media = True
             file_part, attachment = _uploaded_file_message_parts(next(uploaded_iter, {}))
@@ -1129,7 +1139,7 @@ def _message_to_chatgpt(message: Any, uploaded_files: list[dict[str, Any]] | Non
         "create_time": time.time(),
         "content": {
             "content_type": "multimodal_text" if has_media else "text",
-            "parts": parts,
+            "parts": parts or [""],
         },
         "metadata": metadata,
     }

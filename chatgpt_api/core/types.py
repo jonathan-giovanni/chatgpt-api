@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Role = Literal["system", "user", "assistant", "tool"]
-ContentKind = Literal["text", "image_url", "image_bytes"]
+ContentKind = Literal["text", "image_url", "image_bytes", "file_bytes"]
 ChatAction = Literal["next", "continue", "variant"]
 
 
@@ -37,6 +37,10 @@ class ContentPart:
         name: str | None = None,
     ) -> "ContentPart":
         return cls(kind="image_bytes", data=data, mime_type=mime_type, name=name)
+
+    @classmethod
+    def file_bytes(cls, data: bytes, mime_type: str, name: str) -> "ContentPart":
+        return cls(kind="file_bytes", data=data, mime_type=mime_type, name=name)
 
 
 @dataclass(slots=True)
