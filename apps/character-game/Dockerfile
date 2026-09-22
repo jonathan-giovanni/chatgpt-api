@@ -26,8 +26,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
-COPY package.json ./
-RUN npm install --omit=dev --ignore-scripts --no-audit --no-fund \
+COPY --from=deps /usr/local/bin/bun /usr/local/bin/bun
+COPY package.json bun.lock ./
+RUN bun install --production --frozen-lockfile --ignore-scripts \
     && npm rebuild better-sqlite3
 
 FROM node:22-trixie-slim AS runtime
