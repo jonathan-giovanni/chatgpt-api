@@ -114,6 +114,14 @@ downloads, and developer tooling.
 | Plus | Expected to work with higher quota than Free/Go, but not personally verified yet. |
 | Pro | Live-tested. Higher image/research capacity and higher recommended local concurrency. |
 
+## Recent Contributions
+
+Recent project updates include:
+
+- **Model discovery and Project routing:** modernizes model metadata and lets new chats target an optional ChatGPT Project.
+- **Text and audio uploads:** supports bounded text-file and WAV/MP3 attachments for new chats.
+- **Conversation continuity:** returns a conversation UUID and accepts it on later requests to continue the same ChatGPT conversation, preserving its account and Project routing.
+
 ## Latest Validation Snapshot
 
 These checks were run locally on 2026-06-28 for the `/v1/images/edits`
