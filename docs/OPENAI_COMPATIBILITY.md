@@ -211,6 +211,39 @@ data: {"object":"chat.completion.chunk","choices":[{"delta":{},"finish_reason":"
 data: [DONE]
 ```
 
+### Conversation continuity
+
+Omit `conversation_id` to start a new ChatGPT conversation. The response adds
+the conversation UUID at the top level:
+
+```json
+{
+  "conversation_id": "11111111-1111-4111-8111-111111111111",
+  "choices": [
+    {"message": {"role": "assistant", "content": "Hello"}}
+  ]
+}
+```
+
+Send that UUID on the next request to continue the same conversation. Only the
+new messages need to be included:
+
+```json
+{
+  "model": "auto",
+  "conversation_id": "11111111-1111-4111-8111-111111111111",
+  "messages": [
+    {"role": "user", "content": "Continue from your previous answer."}
+  ]
+}
+```
+
+The bridge stores the latest parent message and original account in its local
+SQLite database. Project conversations also remain attached to their original
+Project. An unknown UUID is rejected instead of silently creating a different
+conversation. Continuations currently support ordinary chat without tools,
+agent mode, Deep Research, or new file attachments.
+
 ### Text and audio attachments
 
 `POST /v1/chat/completions` accepts inline text files and audio in a new user

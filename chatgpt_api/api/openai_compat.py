@@ -186,6 +186,7 @@ class _ChatGPTOperation:
     account: str | None = None
     provider: ChatGPTProvider | None = None
     conversation_id: str | None = None
+    parent_message_id: str | None = None
     deep_research_message_id: str | None = None
     deep_research_session_id: str | None = None
     cancel_requested: bool = False
@@ -537,6 +538,38 @@ def _finish_chatgpt_operation(operation_id: str | None) -> None:
     _update_chatgpt_operation(operation_id, completed=True)
 
 
+async def _finalize_conversation_session(
+    config: OpenAICompatConfig,
+    operation: _ChatGPTOperation,
+    project: ProjectMapping | None,
+) -> dict[str, Any]:
+    conversation_id = operation.conversation_id
+    if not conversation_id:
+        return {}
+    parent_message_id = operation.parent_message_id
+    if not parent_message_id and operation.provider is not None:
+        transport = getattr(operation.provider, "transport", None)
+        resolver = getattr(transport, "conversation_parent_message_id", None)
+        if callable(resolver):
+            try:
+                parent_message_id = await asyncio.to_thread(resolver, conversation_id)
+            except ProviderError:
+                parent_message_id = None
+            if parent_message_id:
+                _update_chatgpt_operation(operation.operation_id, parent_message_id=parent_message_id)
+    if parent_message_id and operation.account:
+        _admin_store(config).upsert_conversation_session(
+            conversation_id=conversation_id,
+            parent_message_id=parent_message_id,
+            account=operation.account,
+            project_id=project.project_id if project else None,
+        )
+    return {
+        "conversation_id": conversation_id,
+        "chatgpt_conversation_id": conversation_id,
+    }
+
+
 def _chatgpt_operation_cancel_requested(operation_id: str | None) -> bool:
     if not operation_id:
         return False
@@ -563,6 +596,7 @@ def _chatgpt_operation_payload(operation: _ChatGPTOperation) -> dict[str, Any]:
         "account": operation.account,
         "provider_selected": bool(operation.provider),
         "conversation_id": operation.conversation_id,
+        "parent_message_id": operation.parent_message_id,
         "deep_research_message_id": operation.deep_research_message_id,
         "deep_research_session_id": operation.deep_research_session_id,
         "deep_research_ready": deep_research_ready,
@@ -987,6 +1021,7 @@ async def _chat_completion(
     body: dict[str, Any],
     router: AccountRouter | None = None,
 ) -> dict[str, Any]:
+    _hydrate_conversation_request(config, body)
     mapping = _resolve_project_request(config, body)
     with project_context(mapping.project_id if mapping else None):
         response = await _chat_completion_with_project(config, body, router)
@@ -1004,6 +1039,7 @@ async def _chat_completion_with_project(
     body: dict[str, Any],
     router: AccountRouter | None = None,
 ) -> dict[str, Any]:
+    project = _resolve_project_request(config, body) if _project_reference_from_body(body) else None
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
@@ -1012,9 +1048,14 @@ async def _chat_completion_with_project(
     agent_prompt_mode = _resolve_agent_prompt_mode(config, body, model_agent_mode)
     model_slug, thinking_effort = _resolve_model_alias(model, _str_or_none(body.get("thinking_effort")))
     tools = body.get("tools") if isinstance(body.get("tools"), list) else []
+    conversation_id, parent_message_id = _validate_conversation_request(body, tools, model_agent_mode)
     temporary_chat = _resolve_temporary_chat_mode(config, body)
     router = _router_for_request(config, router, body)
-    local_command_response = await _maybe_handle_local_chatgpt_command(config, messages, requested_model, router)
+    local_command_response = (
+        None
+        if conversation_id
+        else await _maybe_handle_local_chatgpt_command(config, messages, requested_model, router)
+    )
     if local_command_response is not None:
         return local_command_response
     has_files = _validate_file_request(body, messages, tools, model_agent_mode)
@@ -1035,11 +1076,23 @@ async def _chat_completion_with_project(
     requested_operation_id = _str_or_none(body.get("chatgpt_operation_id")) or _str_or_none(
         request_metadata.get("chatgpt_operation_id")
     )
-    operation = _create_chatgpt_operation("chat", requested_operation_id) if requested_operation_id else None
-    operation_id = operation.operation_id if operation else None
-    operation_extra = {"chatgpt_operation_id": operation_id} if operation_id else None
+    operation = _create_chatgpt_operation("chat", requested_operation_id)
+    operation_id = operation.operation_id
+    if conversation_id:
+        _update_chatgpt_operation(
+            operation_id,
+            conversation_id=conversation_id,
+            parent_message_id=parent_message_id,
+        )
+    operation_extra = {"chatgpt_operation_id": operation_id} if requested_operation_id else {}
     if not _should_use_agent_bridge(body, tools, model_agent_mode):
         try:
+            collect_kwargs: dict[str, Any] = {"operation_id": operation_id}
+            if conversation_id:
+                collect_kwargs.update(
+                    conversation_id=conversation_id,
+                    parent_message_id=parent_message_id,
+                )
             account, provider, text = await _collect_messages_text_with_accounts(
                 config,
                 router,
@@ -1048,7 +1101,7 @@ async def _chat_completion_with_project(
                 model_slug,
                 thinking_effort,
                 temporary_chat,
-                operation_id=operation_id,
+                **collect_kwargs,
             )
             if not text:
                 raise OpenAICompatProviderError(
@@ -1058,7 +1111,14 @@ async def _chat_completion_with_project(
                     await _conversation_init_metadata(provider, model_slug),
                     account=account,
                 )
-            return _completion_response(requested_model, text, [], account=account, extra=operation_extra)
+            conversation_extra = await _finalize_conversation_session(config, operation, project)
+            return _completion_response(
+                requested_model,
+                text,
+                [],
+                account=account,
+                extra={**operation_extra, **conversation_extra},
+            )
         finally:
             _finish_chatgpt_operation(operation_id)
     prompt = _build_chat_prompt(messages, tools, body.get("tool_choice"), agent_prompt_mode)
@@ -1218,6 +1278,7 @@ async def _chat_completion_stream(
     router: AccountRouter,
     handler: BaseHTTPRequestHandler,
 ) -> None:
+    _hydrate_conversation_request(config, body)
     mapping = _resolve_project_request(config, body)
     with project_context(mapping.project_id if mapping else None):
         await _chat_completion_stream_with_project(config, body, router, handler, mapping)
@@ -1238,10 +1299,15 @@ async def _chat_completion_stream_with_project(
     agent_prompt_mode = _resolve_agent_prompt_mode(config, body, model_agent_mode)
     model_slug, thinking_effort = _resolve_model_alias(model, _str_or_none(body.get("thinking_effort")))
     tools = body.get("tools") if isinstance(body.get("tools"), list) else []
+    conversation_id, parent_message_id = _validate_conversation_request(body, tools, model_agent_mode)
     temporary_chat = _resolve_temporary_chat_mode(config, body)
     router = _router_for_request(config, router, body)
 
-    local_command_response = await _maybe_handle_local_chatgpt_command(config, messages, requested_model, router)
+    local_command_response = (
+        None
+        if conversation_id
+        else await _maybe_handle_local_chatgpt_command(config, messages, requested_model, router)
+    )
     if local_command_response is not None:
         _send_sse_completion(handler, local_command_response)
         return
@@ -1263,6 +1329,12 @@ async def _chat_completion_stream_with_project(
         return
 
     operation = _create_chatgpt_operation("chat")
+    if conversation_id:
+        _update_chatgpt_operation(
+            operation.operation_id,
+            conversation_id=conversation_id,
+            parent_message_id=parent_message_id,
+        )
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     chunk_base = {
         "id": completion_id,
@@ -1271,6 +1343,9 @@ async def _chat_completion_stream_with_project(
         "model": requested_model,
         "chatgpt_operation_id": operation.operation_id,
     }
+    if conversation_id:
+        chunk_base["conversation_id"] = conversation_id
+        chunk_base["chatgpt_conversation_id"] = conversation_id
     if project:
         chunk_base["chatgpt_project"] = {
             "alias": project.alias,
@@ -1286,6 +1361,7 @@ async def _chat_completion_stream_with_project(
         )
 
         def on_conversation_id(conversation_id: str) -> None:
+            chunk_base["conversation_id"] = conversation_id
             chunk_base["chatgpt_conversation_id"] = conversation_id
 
         if not _should_use_agent_bridge(body, tools, model_agent_mode):
@@ -1300,7 +1376,10 @@ async def _chat_completion_stream_with_project(
                 lambda delta: _write_sse_content(handler, chunk_base, delta),
                 operation_id=operation.operation_id,
                 on_conversation_id=on_conversation_id,
+                conversation_id=conversation_id,
+                parent_message_id=parent_message_id,
             )
+            await _finalize_conversation_session(config, operation, project)
             _write_sse_finish(handler, chunk_base, "stop")
             return
 
@@ -1383,6 +1462,8 @@ async def _stream_messages_text_with_accounts(
     on_delta: Any,
     operation_id: str | None = None,
     on_conversation_id: Any | None = None,
+    conversation_id: str | None = None,
+    parent_message_id: str | None = None,
 ) -> tuple[str, ChatGPTProvider, str]:
     provider_messages = _openai_messages_to_provider_messages(messages)
     input_attachment_count = _provider_message_attachment_count(provider_messages)
@@ -1417,33 +1498,37 @@ async def _stream_messages_text_with_accounts(
                 raise compat_error from preflight_error
         _update_chatgpt_operation(operation_id, account=account, provider=provider)
         chunks: list[str] = []
-        conversation_id: str | None = None
+        active_conversation_id = conversation_id
 
         async def operation() -> None:
-            nonlocal conversation_id
+            nonlocal active_conversation_id
             async for delta in provider.stream_chat(
                 ChatRequest(
                     messages=provider_messages,
                     model=model_slug,
+                    conversation_id=conversation_id,
+                    parent_message_id=parent_message_id,
                     thinking_effort=thinking_effort,
                     stream=True,
                     metadata={"history_and_training_disabled": temporary_chat},
                 )
             ):
                 if delta.conversation_id:
-                    conversation_id = delta.conversation_id
-                    _update_chatgpt_operation(operation_id, conversation_id=conversation_id)
+                    active_conversation_id = delta.conversation_id
+                    _update_chatgpt_operation(operation_id, conversation_id=active_conversation_id)
                     if on_conversation_id is not None:
-                        on_conversation_id(conversation_id)
+                        on_conversation_id(active_conversation_id)
                     if _chatgpt_operation_cancel_requested(operation_id):
                         _stop_chatgpt_operation_by_id(operation_id)
                         raise _ClientDisconnected()
+                if delta.message_id:
+                    _update_chatgpt_operation(operation_id, parent_message_id=delta.message_id)
                 if delta.text:
                     chunks.append(delta.text)
                     try:
                         on_delta(delta.text)
                     except _ClientDisconnected:
-                        await _stop_chatgpt_conversation_after_disconnect(provider, conversation_id)
+                        await _stop_chatgpt_conversation_after_disconnect(provider, active_conversation_id)
                         raise
 
         try:
@@ -2551,6 +2636,72 @@ def _project_reference_from_body(body: dict[str, Any]) -> str | None:
     return _str_or_none(body.get("chatgpt_project")) or _str_or_none(metadata.get("chatgpt_project"))
 
 
+def _conversation_id_from_body(body: dict[str, Any]) -> str | None:
+    conversation_id = _str_or_none(body.get("conversation_id"))
+    if not conversation_id:
+        return None
+    try:
+        uuid.UUID(conversation_id)
+    except ValueError as exc:
+        raise ValueError("conversation_id must be a UUID") from exc
+    return conversation_id
+
+
+def _hydrate_conversation_request(config: OpenAICompatConfig, body: dict[str, Any]) -> dict[str, Any] | None:
+    conversation_id = _conversation_id_from_body(body)
+    if not conversation_id:
+        return None
+    session = _admin_store(config).get_conversation_session(conversation_id)
+    if session is None:
+        raise ValueError(
+            "unknown conversation_id; start a new conversation without conversation_id and reuse the returned UUID"
+        )
+
+    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    explicit_account = _str_or_none(body.get("chatgpt_account")) or _str_or_none(
+        metadata.get("chatgpt_account")
+    )
+    if explicit_account and explicit_account != session["account"]:
+        raise ValueError(
+            f"conversation_id belongs to account {session['account']}, not {explicit_account}"
+        )
+    if body.get("chatgpt_accounts") is not None or metadata.get("chatgpt_accounts") is not None:
+        raise ValueError("chatgpt_accounts cannot be combined with conversation_id")
+    body["chatgpt_account"] = session["account"]
+    body["_chatgpt_parent_message_id"] = session["parent_message_id"]
+
+    project_reference = _project_reference_from_body(body)
+    session_project_id = _str_or_none(session.get("project_id"))
+    if session_project_id:
+        if project_reference:
+            requested_project = _admin_store(config).resolve_project(project_reference)
+            if requested_project is None or requested_project.project_id != session_project_id:
+                raise ValueError("conversation_id cannot be moved to a different ChatGPT Project")
+        else:
+            body["chatgpt_project"] = session_project_id
+    elif project_reference:
+        raise ValueError("conversation_id was created outside Projects and cannot be moved into one")
+    return session
+
+
+def _validate_conversation_request(
+    body: dict[str, Any],
+    tools: list[Any],
+    model_agent_mode: str | None,
+) -> tuple[str | None, str | None]:
+    conversation_id = _conversation_id_from_body(body)
+    if not conversation_id:
+        return None, None
+    if tools or _should_use_agent_bridge(body, tools, model_agent_mode):
+        raise ValueError("conversation_id is supported for ordinary chat without tools or agent mode")
+    if body.get("model") in DEEP_RESEARCH_MODEL_ALIASES:
+        raise ValueError("conversation_id is not supported for Deep Research")
+    parent_message_id = _str_or_none(body.get("_chatgpt_parent_message_id"))
+    if not parent_message_id:
+        raise ValueError("conversation_id has no saved parent message")
+    return conversation_id, parent_message_id
+
+
 def _resolve_project_request(config: OpenAICompatConfig, body: dict[str, Any]) -> ProjectMapping | None:
     reference = _project_reference_from_body(body)
     if not reference:
@@ -3171,6 +3322,8 @@ async def _collect_messages_text_with_accounts(
     thinking_effort: str | None,
     temporary_chat: bool,
     operation_id: str | None = None,
+    conversation_id: str | None = None,
+    parent_message_id: str | None = None,
 ) -> tuple[str, ChatGPTProvider, str]:
     attempts: list[dict[str, Any]] = []
     last_error: OpenAICompatProviderError | None = None
@@ -3206,6 +3359,12 @@ async def _collect_messages_text_with_accounts(
         try:
             _update_chatgpt_operation(operation_id, account=account, provider=provider)
             features = ("upload", "chat") if input_attachment_count else ("chat",)
+            collect_kwargs: dict[str, Any] = {"operation_id": operation_id}
+            if conversation_id:
+                collect_kwargs.update(
+                    conversation_id=conversation_id,
+                    parent_message_id=parent_message_id,
+                )
             text = await _with_provider_feature_limits(
                 config,
                 provider,
@@ -3216,7 +3375,7 @@ async def _collect_messages_text_with_accounts(
                     model_slug,
                     thinking_effort,
                     temporary_chat,
-                    operation_id=operation_id,
+                    **collect_kwargs,
                 ),
             )
         except ProviderError as exc:
@@ -3623,6 +3782,8 @@ async def _collect_text(provider: ChatGPTProvider, request: ChatRequest, operati
                 if _chatgpt_operation_cancel_requested(operation_id):
                     _stop_chatgpt_operation_by_id(operation_id)
                     raise ProviderError("ChatGPT operation cancelled")
+            if delta.message_id:
+                _update_chatgpt_operation(operation_id, parent_message_id=delta.message_id)
             if delta.text:
                 chunks.append(delta.text)
         return "".join(chunks).strip()
@@ -3678,12 +3839,16 @@ async def _collect_messages_text(
     thinking_effort: str | None,
     temporary_chat: bool,
     operation_id: str | None = None,
+    conversation_id: str | None = None,
+    parent_message_id: str | None = None,
 ) -> str:
     return await _collect_text(
         provider,
         ChatRequest(
             messages=messages,
             model=model_slug,
+            conversation_id=conversation_id,
+            parent_message_id=parent_message_id,
             thinking_effort=thinking_effort,
             stream=True,
             metadata={"history_and_training_disabled": temporary_chat},

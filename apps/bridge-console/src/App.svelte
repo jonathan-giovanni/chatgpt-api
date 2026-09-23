@@ -706,6 +706,7 @@
   let newCaptureText = $state("");
   let newCaptureResult = $state<Json | null>(null);
   let selectedChatProject = $state("");
+  let chatConversationId = $state("");
   let chatFiles = $state<File[]>([]);
   let chatFilesError = $state("");
   let projectName = $state("");
@@ -780,6 +781,9 @@
       stream: false,
       ...(selectedChatProject
         ? { chatgpt_project: selectedChatProject }
+        : {}),
+      ...(chatConversationId.trim()
+        ? { conversation_id: chatConversationId.trim() }
         : {}),
     }),
   );
@@ -1292,10 +1296,23 @@
           ...(selectedChatProject
             ? { chatgpt_project: selectedChatProject }
             : {}),
+          ...(chatConversationId.trim()
+            ? { conversation_id: chatConversationId.trim() }
+            : {}),
         }),
       });
-      chatResult = `${Math.round(performance.now() - started)}ms\n\n${payload.choices?.[0]?.message?.content || JSON.stringify(payload, null, 2)}`;
+      if (payload.conversation_id) {
+        chatConversationId = String(payload.conversation_id);
+      }
+      chatFiles = [];
+      chatResult = `${Math.round(performance.now() - started)}ms\nconversation_id=${payload.conversation_id || "-"}\n\n${payload.choices?.[0]?.message?.content || JSON.stringify(payload, null, 2)}`;
     });
+  }
+
+  function startNewChat() {
+    chatConversationId = "";
+    chatResult = "";
+    chatFiles = [];
   }
 
   function selectChatFiles(event: Event) {
@@ -1690,7 +1707,7 @@
       {
         title: "Carry conversation context",
         path: "POST /v1/chat/completions",
-        note: "The bridge does not magically know your app session. Send prior messages you want the model to remember.",
+        note: "Reuse the returned conversation_id for the same ChatGPT thread, or send prior messages for stateless compatibility.",
         code: curl("POST", "/chat/completions", {
           model: "auto",
           messages: [
@@ -3862,6 +3879,7 @@
               <select
                 class="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950 px-3 py-3 outline-none focus:border-sky-300/60"
                 bind:value={selectedChatProject}
+                disabled={Boolean(chatConversationId.trim())}
               >
                 <option value="">Outside Projects</option>
                 {#each projects as project (project.alias)}
@@ -3871,16 +3889,30 @@
                 {/each}
               </select>
             </label>
+            <label class="mt-4 block">
+              <span class="text-sm font-bold text-slate-300"
+                >Conversation UUID (optional)</span
+              >
+              <input
+                class="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950 px-3 py-3 font-mono text-sm outline-none focus:border-sky-300/60"
+                bind:value={chatConversationId}
+                placeholder="Empty starts a new conversation"
+              />
+            </label>
+            <p class="mt-2 text-xs text-slate-400">
+              The first response fills this UUID automatically. Keep it to send
+              the next message to the same conversation, or clear it to start a new one.
+            </p>
             <Input label="Model" bind:value={chatModel} />
             <Textarea label="Message" bind:value={chatPrompt} rows={5} />
             <label class="mt-4 block text-sm font-bold text-slate-300">
               Adjuntar audio o texto
-              <input class="mt-2 block w-full text-sm" type="file" multiple accept=".txt,.md,.csv,.json,.wav,.mp3" onchange={selectChatFiles} />
+              <input class="mt-2 block w-full text-sm" type="file" multiple accept=".txt,.md,.csv,.json,.wav,.mp3" onchange={selectChatFiles} disabled={Boolean(chatConversationId.trim())} />
             </label>
             <p class="mt-2 text-xs text-slate-400">
               TXT, MD, CSV y JSON en UTF-8; audio WAV o MP3 como archivo adjunto.
               Máximo 10 archivos, 20 MiB por archivo y 25 MiB en total.
-              Cada envío crea una conversación nueva en el Project seleccionado.
+              Los adjuntos solo se aceptan al crear una conversación nueva.
               El análisis de audio depende del modelo; no es el modo Voz.
             </p>
             {#if chatFilesError}<p role="alert" class="mt-2 text-sm text-rose-300">{chatFilesError}</p>{/if}
@@ -3890,13 +3922,22 @@
                 <button class="text-rose-300" aria-label={`Quitar ${file.name}`} onclick={() => chatFiles = chatFiles.filter((_, i) => i !== index)}>Quitar</button>
               </div>
             {/each}
-            <button
-              class="mt-4 rounded-2xl bg-sky-300 px-4 py-3 font-black text-slate-950"
-              onclick={runChat}
-              disabled={Boolean(busy) || Boolean(chatFilesError)}
-            >
-              Run chat
-            </button>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <button
+                class="rounded-2xl bg-sky-300 px-4 py-3 font-black text-slate-950"
+                onclick={runChat}
+                disabled={Boolean(busy) || Boolean(chatFilesError)}
+              >
+                {chatConversationId.trim() ? "Continue chat" : "Start chat"}
+              </button>
+              <button
+                class="rounded-2xl border border-white/15 px-4 py-3 font-black text-slate-200"
+                onclick={startNewChat}
+                disabled={!chatConversationId.trim() || Boolean(busy)}
+              >
+                New conversation
+              </button>
+            </div>
             {#if chatFiles.length === 0}<CodeBlock title="curl" code={chatCurl} />{/if}
             <pre
               class="mt-4 min-h-40 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-white/10 bg-slate-950 p-4 text-sm text-slate-300">{chatResult}</pre>
@@ -3907,8 +3948,9 @@
           >
             <PanelTitle kicker="context" title="Carry context test" />
             <p class="text-sm text-slate-400">
-              This sends prior messages in one request. Your app owns the
-              conversation memory and passes the messages it wants remembered.
+              This demonstrates stateless compatibility by sending prior
+              messages in one request. Use Conversation UUID in the chat panel
+              above to continue the same ChatGPT thread.
             </p>
             <Textarea
               label="System prompt"

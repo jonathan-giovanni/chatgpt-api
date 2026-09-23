@@ -492,6 +492,18 @@ def test_event_to_delta_extracts_text():
     assert delta.conversation_id == "c1"
 
 
+def test_event_to_delta_extracts_message_id_for_continuation():
+    delta = _event_to_delta(
+        {
+            "conversation_id": "11111111-1111-4111-8111-111111111111",
+            "v": {"message": {"id": "assistant-message-1", "content": {"parts": ["hello"]}}},
+        }
+    )
+
+    assert delta is not None
+    assert delta.message_id == "assistant-message-1"
+
+
 def test_event_to_delta_ignores_non_content_patch_values():
     delta = _event_to_delta(
         {

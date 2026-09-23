@@ -230,6 +230,32 @@ class ChatGPTWebTransport:
             raise ProviderError(f"ChatGPT conversation init failed: {response.status_code} {_body_preview(response)}")
         return _json_response(response)
 
+    def conversation_parent_message_id(self, conversation_id: str) -> str | None:
+        self.ensure_configured()
+        try:
+            from curl_cffi import requests
+        except ImportError as exc:
+            raise ProviderNotConfigured("curl_cffi is required for ChatGPT Web transport") from exc
+
+        try:
+            response = requests.get(
+                f"{self.endpoints.base_url}/backend-api/conversation/{conversation_id}",
+                headers=_conversation_headers(self.auth.request_headers()),
+                impersonate=self.impersonate,
+                timeout=self.timeout,
+            )
+        except Exception as exc:
+            raise ProviderError(f"ChatGPT conversation lookup failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise ProviderError(
+                f"ChatGPT conversation lookup failed: {response.status_code} {_body_preview(response)}"
+            )
+        payload = _json_response(response)
+        current_node = payload.get("current_node")
+        if isinstance(current_node, str) and current_node:
+            return current_node
+        return _latest_message_id_from_value(payload)
+
     def stop_conversation(
         self,
         conversation_id: str,
@@ -1395,14 +1421,15 @@ def _body_preview(response: Any) -> str:
 
 def _event_to_delta(event: dict[str, Any]) -> ChatDelta | None:
     conversation_id = event.get("conversation_id") if isinstance(event.get("conversation_id"), str) else None
+    message_id = _latest_message_id_from_value(event)
     value = event.get("v")
     text = _extract_text(value, event.get("p"))
     if text:
-        return ChatDelta(text=text, conversation_id=conversation_id, raw=event)
+        return ChatDelta(text=text, conversation_id=conversation_id, message_id=message_id, raw=event)
     event_type = event.get("type") or event.get("event")
     if event_type == "resume_conversation_token":
-        return ChatDelta(conversation_id=conversation_id, raw=event)
-    return ChatDelta(raw=event) if event else None
+        return ChatDelta(conversation_id=conversation_id, message_id=message_id, raw=event)
+    return ChatDelta(message_id=message_id, raw=event) if event else None
 
 
 def _extract_text(value: Any, path: Any = None) -> str:

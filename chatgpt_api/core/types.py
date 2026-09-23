@@ -71,6 +71,7 @@ class ChatDelta:
     text: str = ""
     role: Role | None = None
     conversation_id: str | None = None
+    message_id: str | None = None
     raw: Any = None
     done: bool = False
 
