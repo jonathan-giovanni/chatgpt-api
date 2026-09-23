@@ -76,6 +76,18 @@ class BridgeAdminStore:
 
                 CREATE INDEX IF NOT EXISTS project_mappings_account_idx
                     ON project_mappings(account, name COLLATE NOCASE);
+
+                CREATE TABLE IF NOT EXISTS conversation_sessions (
+                    conversation_id TEXT PRIMARY KEY,
+                    parent_message_id TEXT NOT NULL,
+                    account TEXT NOT NULL,
+                    project_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS conversation_sessions_account_idx
+                    ON conversation_sessions(account, updated_at DESC);
                 """
             )
 
@@ -280,6 +292,48 @@ class BridgeAdminStore:
                 (normalized, reference.strip()),
             )
             return cursor.rowcount > 0
+
+    def upsert_conversation_session(
+        self,
+        *,
+        conversation_id: str,
+        parent_message_id: str,
+        account: str,
+        project_id: str | None = None,
+    ) -> None:
+        now = utc_now()
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO conversation_sessions (
+                    conversation_id, parent_message_id, account, project_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    parent_message_id = excluded.parent_message_id,
+                    account = excluded.account,
+                    project_id = COALESCE(excluded.project_id, conversation_sessions.project_id),
+                    updated_at = excluded.updated_at
+                """,
+                (conversation_id, parent_message_id, account, project_id, now, now),
+            )
+
+    def get_conversation_session(self, conversation_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM conversation_sessions WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "conversation_id": row["conversation_id"],
+            "parent_message_id": row["parent_message_id"],
+            "account": row["account"],
+            "project_id": row["project_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def _artifact_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return {

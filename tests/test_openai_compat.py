@@ -487,6 +487,79 @@ def test_multi_account_chat_falls_back_after_provider_error(monkeypatch):
     assert response["choices"][0]["message"]["content"] == "ok from pro"
 
 
+def test_chat_completion_continues_with_returned_conversation_uuid(monkeypatch, tmp_path):
+    conversation_id = "11111111-1111-4111-8111-111111111111"
+    requests = []
+
+    class FakeTransport:
+        pass
+
+    class FakeProvider:
+        account = "plus-work"
+        transport = FakeTransport()
+
+        async def stream_chat(self, request):
+            requests.append(request)
+            message_id = f"assistant-message-{len(requests)}"
+            yield ChatDelta(conversation_id=conversation_id, message_id=message_id)
+            yield ChatDelta(text=f"reply-{len(requests)}")
+
+    provider = FakeProvider()
+    monkeypatch.setattr(compat, "_provider_for_account", lambda config, account=None: provider)
+    config = OpenAICompatConfig(
+        account="plus-work",
+        accounts=("plus-work",),
+        admin_db_path=tmp_path / "admin.sqlite",
+    )
+
+    first = compat.asyncio.run(
+        compat._chat_completion(
+            config,
+            {"model": "auto", "messages": [{"role": "user", "content": "Remember blue."}]},
+        )
+    )
+    second = compat.asyncio.run(
+        compat._chat_completion(
+            config,
+            {
+                "model": "auto",
+                "conversation_id": first["conversation_id"],
+                "messages": [{"role": "user", "content": "What color?"}],
+            },
+        )
+    )
+
+    assert first["conversation_id"] == conversation_id
+    assert first["chatgpt_conversation_id"] == conversation_id
+    assert requests[0].conversation_id is None
+    assert requests[1].conversation_id == conversation_id
+    assert requests[1].parent_message_id == "assistant-message-1"
+    assert second["conversation_id"] == conversation_id
+    assert compat.BridgeAdminStore(config.admin_db_path).get_conversation_session(conversation_id)[
+        "parent_message_id"
+    ] == "assistant-message-2"
+
+
+def test_chat_completion_rejects_unknown_conversation_uuid(tmp_path):
+    config = OpenAICompatConfig(
+        account="plus-work",
+        accounts=("plus-work",),
+        admin_db_path=tmp_path / "admin.sqlite",
+    )
+
+    with pytest.raises(ValueError, match="unknown conversation_id"):
+        compat.asyncio.run(
+            compat._chat_completion(
+                config,
+                {
+                    "model": "auto",
+                    "conversation_id": "22222222-2222-4222-8222-222222222222",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+        )
+
+
 def test_stream_disconnect_stops_chatgpt_conversation(monkeypatch):
     stop_calls = []
 

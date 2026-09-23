@@ -55,3 +55,26 @@ def test_project_mappings_resolve_name_alias_and_id(tmp_path):
     assert store.list_projects() == [mapping]
     assert store.delete_project("Support") is True
     assert store.resolve_project("support") is None
+
+
+def test_conversation_sessions_keep_latest_parent_and_original_project(tmp_path):
+    store = BridgeAdminStore(tmp_path / "admin.sqlite")
+    conversation_id = "11111111-1111-4111-8111-111111111111"
+
+    store.upsert_conversation_session(
+        conversation_id=conversation_id,
+        parent_message_id="message-1",
+        account="plus-work",
+        project_id="g-p-0123456789abcdef0123456789abcdef",
+    )
+    store.upsert_conversation_session(
+        conversation_id=conversation_id,
+        parent_message_id="message-2",
+        account="plus-work",
+    )
+
+    session = store.get_conversation_session(conversation_id)
+    assert session is not None
+    assert session["parent_message_id"] == "message-2"
+    assert session["account"] == "plus-work"
+    assert session["project_id"] == "g-p-0123456789abcdef0123456789abcdef"
