@@ -89,7 +89,6 @@ def test_openai_content_converts_inline_text_and_audio_files():
         {"messages": [], "tools": [{"type": "function"}]},
         {"messages": [], "agent_mode": "optimized"},
         {"messages": [], "model": "chatgpt-deep-research"},
-        {"messages": [], "conversation_id": "conversation-1"},
         {"messages": [], "parent_message_id": "message-1"},
         {"messages": [], "action": "continue"},
     ],
@@ -117,6 +116,16 @@ def test_validate_file_request_rejects_incompatible_modes(body):
             body.get("tools", []),
             "optimized" if body.get("agent_mode") else None,
         )
+
+
+def test_validate_file_request_allows_existing_conversation():
+    body = {
+        "conversation_id": "b7f60d76-41d0-4de3-b661-f6f4f8798224",
+        "messages": [{"role": "user", "content": [{
+            "type": "file", "file": {"filename": "notes.txt", "file_data": base64.b64encode(b"hello").decode("ascii")}
+        }]}],
+    }
+    assert compat._validate_file_request(body, body["messages"], [], None)
 
 
 def test_resolve_image_model_alias_maps_openai_names_to_auto():

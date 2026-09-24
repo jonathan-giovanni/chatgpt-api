@@ -119,14 +119,26 @@ downloads, and developer tooling.
 Recent project updates include:
 
 - **Model discovery and Project routing:** modernizes model metadata and lets new chats target an optional ChatGPT Project.
-- **Text and audio attachments:** accepts bounded text-file and WAV/MP3 attachments for new chats. Audio files sent this way are generic attachments and do not guarantee transcription.
+- **Text and audio attachments:** accepts bounded text-file and WAV/MP3 attachments in ordinary chats, including existing conversations. Audio files sent this way are generic attachments and do not guarantee transcription.
 - **Conversation continuity:** returns a conversation UUID and accepts it on later requests to continue the same ChatGPT conversation, preserving its account and Project routing.
-- **Experimental Web Voice:** `/voice` connects a local audio file or microphone to ChatGPT Web over WebRTC, with server-side SDP signalling and no browser exposure of the ChatGPT credential. See [voice transport](docs/VOICE_TRANSPORT.md) for setup and limits.
+- **Experimental Web Voice and SIP/RTP:** `/voice` connects a local audio file or microphone over WebRTC with optional initial text, chat model, Project, UUID, and text attachments; an optional one-call SIP/PCMU gateway uses the same voice API. Voice-model selection remains automatic. See [voice transport](docs/VOICE_TRANSPORT.md) for setup and limits.
 
 ## Latest Validation Snapshot
 
-These checks were run locally on 2026-06-28 for the `/v1/images/edits`
-regression fixed in issue #3.
+These checks were run locally on 2026-09-24 for Web Voice and SIP/RTP:
+
+| Check | Result |
+| --- | --- |
+| Python full suite in Linux Docker | `251 passed` |
+| Browser WebRTC call with a local WAV and initial text | remote audio track played; conversation UUID returned |
+| Project and attachment continuation | upstream Project association confirmed; later text-file reply stayed in the same UUID |
+| Local SIP/PCMU call | SIP INVITE/BYE returned `200`; RTP audio flowed in both directions |
+
+The embedded browser did not open the optional WebRTC DataChannel, so in-call
+captions and DataChannel text are still experimental. Text and text files can
+use the same conversation UUID over the regular HTTP chat route.
+
+Earlier checks were run on 2026-06-28 for the `/v1/images/edits` regression:
 
 | Check | Result |
 | --- | --- |

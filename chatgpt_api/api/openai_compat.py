@@ -863,6 +863,109 @@ def run_server(config: OpenAICompatConfig) -> None:
         server.server_close()
 
 
+async def _start_voice_session(
+    config: OpenAICompatConfig, router: AccountRouter, body: dict[str, Any]
+) -> dict[str, Any]:
+    """Prepare an optional chat turn, then exchange one WebRTC offer."""
+    bridge_id = body.get("bridge_session_id")
+    text = body.get("text")
+    files = body.get("files", [])
+    project = body.get("project")
+    if project is None:
+        project = body.get("chatgpt_project")
+    model = body.get("model", "auto")
+    if not isinstance(model, str) or not model or model in DEEP_RESEARCH_MODEL_ALIASES or model == "gpt-image-1":
+        raise ValueError("model must be an ordinary ChatGPT model")
+    model_slug, _ = _resolve_model_alias(model, None)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", model_slug):
+        raise ValueError("model is not supported for voice")
+    if not isinstance(text, (str, type(None))) or (isinstance(text, str) and len(text) > 20_000):
+        raise ValueError("text must be at most 20000 characters")
+    if project is not None and (not isinstance(project, str) or not project.strip()):
+        raise ValueError("project must be a non-empty name or alias")
+    if body.get("chatgpt_account") is not None and not _str_or_none(body.get("chatgpt_account")):
+        raise ValueError("chatgpt_account must be an account alias")
+    if body.get("conversation_id") not in (None, ""):
+        _conversation_id_from_body(body)
+    if not isinstance(files, list) or len(files) > 10:
+        raise ValueError("files must be a list of at most 10 attachments")
+    if bridge_id and (text or files or project or body.get("conversation_id")):
+        raise ValueError("reconnect using bridge_session_id without repeating chat context")
+    if files and not (text and text.strip()):
+        raise ValueError("text is required when attaching files")
+
+    conversation_id = body.get("conversation_id")
+    account: str | None = None
+    parent_message_id: str | None = None
+    project_id: str | None = None
+    initial_response: str | None = None
+    if not bridge_id:
+        context_body: dict[str, Any] = {"model": model, "temporary_chat": False}
+        if conversation_id:
+            context_body["conversation_id"] = conversation_id
+        if project:
+            context_body["chatgpt_project"] = project
+        if body.get("chatgpt_account"):
+            context_body["chatgpt_account"] = body["chatgpt_account"]
+        if text and text.strip():
+            content: str | list[dict[str, Any]] = text.strip()
+            if files:
+                content = [{"type": "text", "text": text.strip()}]
+                for file in files:
+                    if not isinstance(file, dict):
+                        raise ValueError("each file must contain filename and file_data")
+                    content.append({"type": "file", "file": file})
+            context_body["messages"] = [{"role": "user", "content": content}]
+            completion = await _chat_completion(config, context_body, router)
+            conversation_id = completion.get("conversation_id")
+            if not conversation_id:
+                raise VoiceSignallingError("initial chat did not return a conversation_id")
+            initial_response = completion.get("choices", [{}])[0].get("message", {}).get("content")
+            account = completion.get("chatgpt_account")
+        elif conversation_id:
+            _hydrate_conversation_request(config, context_body)
+        if conversation_id:
+            session = _admin_store(config).get_conversation_session(conversation_id)
+            if not session:
+                raise VoiceSignallingError("conversation has no saved parent message")
+            account = session["account"]
+            parent_message_id = session["parent_message_id"]
+            project_id = session.get("project_id")
+        else:
+            mapping = _resolve_project_request(config, context_body)
+            if mapping:
+                account = mapping.account
+                project_id = mapping.project_id
+            elif context_body.get("chatgpt_account"):
+                account = context_body["chatgpt_account"]
+
+    def load_voice_auth(selected: str) -> tuple[ChatGPTAuthConfig, str]:
+        provider = _provider_for_account(config, selected)
+        return provider.transport.auth, provider.transport.impersonate
+
+    answer = negotiate_voice(
+        offer_sdp=body.get("offer_sdp"),
+        voice=body.get("voice", "cove"),
+        bridge_session_id=bridge_id,
+        conversation_id=conversation_id,
+        parent_message_id=parent_message_id,
+        project_id=project_id,
+        model=model_slug,
+        account_order=(account,) if account else router.order(),
+        load_auth=load_voice_auth,
+    )
+    result = {
+        "answer_sdp": answer.answer_sdp,
+        "bridge_session_id": answer.bridge_session_id,
+        "account": answer.account,
+        "conversation_id": answer.conversation_id,
+        "voice_model": "auto",
+    }
+    if initial_response is not None:
+        result["initial_response"] = initial_response
+    return result
+
+
 def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = None):
     router = router or AccountRouter(_accounts_for_config(config), config.account_strategy)
     _configure_account_limits(config, router)
@@ -975,26 +1078,14 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             path = urlparse(self.path).path
             if path in {"/v1/chatgpt/voice/sessions", "/v1/chatgpt/voice/sessions/release"}:
                 try:
+                    length = int(self.headers.get("content-length", "0") or "0")
+                    if length <= 0 or length > 36 * 1024 * 1024:
+                        raise ValueError("voice request must contain JSON within 36 MiB")
                     body = _read_json_body(self)
                     if path.endswith("/release"):
                         result = {"released": release_session(body.get("bridge_session_id"))}
                     else:
-                        def load_voice_auth(account: str) -> tuple[ChatGPTAuthConfig, str]:
-                            provider = _provider_for_account(config, account)
-                            return provider.transport.auth, provider.transport.impersonate
-
-                        answer = negotiate_voice(
-                            offer_sdp=body.get("offer_sdp"),
-                            voice=body.get("voice", "cove"),
-                            bridge_session_id=body.get("bridge_session_id"),
-                            account_order=router.order(),
-                            load_auth=load_voice_auth,
-                        )
-                        result = {
-                            "answer_sdp": answer.answer_sdp,
-                            "bridge_session_id": answer.bridge_session_id,
-                            "account": answer.account,
-                        }
+                        result = asyncio.run(_start_voice_session(config, router, body))
                     _send_json(self, 200, result)
                 except VoiceSignallingError as exc:
                     _send_json(self, exc.status, {"error": {"message": str(exc), "type": "voice_signalling_error"}})
@@ -3326,8 +3417,8 @@ def _validate_file_request(body: dict[str, Any], messages: list[Any], tools: lis
         raise ValueError("file uploads cannot be combined with tools or agent mode")
     if body.get("model") in DEEP_RESEARCH_MODEL_ALIASES:
         raise ValueError("file uploads are supported for ordinary chat only")
-    if body.get("conversation_id") or body.get("parent_message_id") or body.get("action", "next") != "next":
-        raise ValueError("file uploads require a new conversation")
+    if body.get("parent_message_id") or body.get("action", "next") != "next":
+        raise ValueError("file uploads require action=next without an explicit parent_message_id")
     # Validate before SSE headers or provider calls, never silently discard files.
     _openai_messages_to_provider_messages(messages)
     return True

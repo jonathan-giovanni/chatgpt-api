@@ -12,13 +12,14 @@ from typing import Any
 
 from chatgpt_api.core.errors import ProviderError
 from chatgpt_api.providers.chatgpt.auth import ChatGPTAuthConfig
+from chatgpt_api.providers.chatgpt.projects import conversation_mode
 from chatgpt_api.providers.chatgpt.timezone import local_timezone_payload
 
 VOICE_URL = "https://chatgpt.com/realtime/wm?dcid=0"
 MAX_OFFER_BYTES = 65_536
 SESSION_TTL_SECONDS = 3_600
 VOICES = frozenset({"breeze", "cove", "ember", "fathom", "glimmer", "juniper", "maple", "orbit", "vale"})
-_SESSION_ACCOUNTS: dict[str, tuple[str, float]] = {}
+_SESSIONS: dict[str, VoiceBinding] = {}
 _SESSION_LOCK = threading.Lock()
 
 
@@ -33,6 +34,18 @@ class VoiceAnswer:
     answer_sdp: str
     bridge_session_id: str
     account: str
+    conversation_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceBinding:
+    account: str
+    deadline: float
+    upstream_session_id: str
+    conversation_id: str | None
+    parent_message_id: str | None
+    project_id: str | None
+    model: str
 
 
 def _validated_offer(value: Any) -> str:
@@ -51,14 +64,18 @@ def _validated_session_id(value: Any) -> str | None:
     return value
 
 
-def bound_account(session_id: str | None) -> str | None:
+def bound_session(session_id: str | None) -> VoiceBinding | None:
     now = time.monotonic()
     with _SESSION_LOCK:
-        expired = [key for key, (_, deadline) in _SESSION_ACCOUNTS.items() if deadline <= now]
+        expired = [key for key, binding in _SESSIONS.items() if binding.deadline <= now]
         for key in expired:
-            _SESSION_ACCOUNTS.pop(key, None)
-        record = _SESSION_ACCOUNTS.get(session_id) if session_id else None
-        return record[0] if record else None
+            _SESSIONS.pop(key, None)
+        return _SESSIONS.get(session_id) if session_id else None
+
+
+def bound_account(session_id: str | None) -> str | None:
+    binding = bound_session(session_id)
+    return binding.account if binding else None
 
 
 def release_session(session_id: Any) -> bool:
@@ -66,7 +83,24 @@ def release_session(session_id: Any) -> bool:
     if not validated:
         raise VoiceSignallingError("bridge_session_id is required", 400)
     with _SESSION_LOCK:
-        return _SESSION_ACCOUNTS.pop(validated, None) is not None
+        return _SESSIONS.pop(validated, None) is not None
+
+
+def _optional_uuid(value: Any, name: str) -> str | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise VoiceSignallingError(f"{name} must be a UUID", 400)
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise VoiceSignallingError(f"{name} must be a UUID", 400) from exc
+
+
+def _validated_model(value: Any) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", value):
+        raise VoiceSignallingError("invalid model", 400)
+    return value
 
 
 def negotiate_voice(
@@ -76,34 +110,82 @@ def negotiate_voice(
     account_order: tuple[str, ...],
     load_auth: Any,
     bridge_session_id: Any = None,
+    conversation_id: Any = None,
+    parent_message_id: Any = None,
+    project_id: Any = None,
+    model: Any = "auto",
 ) -> VoiceAnswer:
     """Exchange one browser offer for one upstream answer, with bounded account failover."""
     offer = _validated_offer(offer_sdp)
     if not isinstance(voice, str) or voice not in VOICES:
         raise VoiceSignallingError("unsupported voice", 400)
     session_id = _validated_session_id(bridge_session_id)
-    preferred = bound_account(session_id)
-    accounts = tuple(dict.fromkeys(([preferred] if preferred in account_order else []) + list(account_order)))
+    conversation_id = _optional_uuid(conversation_id, "conversation_id")
+    parent_message_id = _optional_uuid(parent_message_id, "parent_message_id")
+    if parent_message_id and not conversation_id:
+        raise VoiceSignallingError("parent_message_id requires conversation_id", 400)
+    try:
+        conversation_mode(project_id)
+    except ValueError as exc:
+        raise VoiceSignallingError(str(exc), 400) from exc
+    model = _validated_model(model)
+    binding = bound_session(session_id)
+    if session_id and not binding:
+        raise VoiceSignallingError("unknown or expired bridge_session_id", 404)
+    if binding:
+        for name, supplied, saved in (
+            ("conversation_id", conversation_id, binding.conversation_id),
+            ("parent_message_id", parent_message_id, binding.parent_message_id),
+            ("project_id", project_id, binding.project_id),
+        ):
+            if supplied is not None and supplied != saved:
+                raise VoiceSignallingError(f"{name} cannot change during a voice session", 400)
+        if model != "auto" and model != binding.model:
+            raise VoiceSignallingError("model cannot change during a voice session", 400)
+        conversation_id = binding.conversation_id
+        parent_message_id = binding.parent_message_id
+        project_id = binding.project_id
+        model = binding.model
+    accounts = (binding.account,) if binding else tuple(dict.fromkeys(account_order))
     if not accounts:
         raise VoiceSignallingError("no ChatGPT account configured", 503)
     last_error: VoiceSignallingError | None = None
+    upstream_session_id = binding.upstream_session_id if binding else str(uuid.uuid4()).upper()
     for account in accounts[:3]:
         try:
             auth, impersonate = load_auth(account)
-            answer = _post_offer(auth, impersonate, offer, voice)
+            answer = _post_offer(
+                auth, impersonate, offer, voice,
+                conversation_id=conversation_id,
+                parent_message_id=parent_message_id,
+                project_id=project_id,
+                model=model,
+                upstream_session_id=upstream_session_id,
+            )
         except VoiceSignallingError as exc:
             last_error = exc
-            if exc.status == 401:
+            if exc.status == 401 and not binding:
                 continue
             raise
         session_id = session_id or "vs_" + uuid.uuid4().hex
         with _SESSION_LOCK:
-            _SESSION_ACCOUNTS[session_id] = (account, time.monotonic() + SESSION_TTL_SECONDS)
-        return VoiceAnswer(answer_sdp=answer, bridge_session_id=session_id, account=account)
+            _SESSIONS[session_id] = VoiceBinding(
+                account, time.monotonic() + SESSION_TTL_SECONDS,
+                upstream_session_id, conversation_id, parent_message_id, project_id, model,
+            )
+        return VoiceAnswer(answer_sdp=answer, bridge_session_id=session_id, account=account,
+                           conversation_id=conversation_id)
     raise last_error or VoiceSignallingError("no account could establish voice", 503)
 
 
-def _post_offer(auth: ChatGPTAuthConfig, impersonate: str, offer: str, voice: str) -> str:
+def _post_offer(
+    auth: ChatGPTAuthConfig, impersonate: str, offer: str, voice: str, *,
+    conversation_id: str | None = None,
+    parent_message_id: str | None = None,
+    project_id: str | None = None,
+    model: str = "auto",
+    upstream_session_id: str | None = None,
+) -> str:
     try:
         from curl_cffi import requests
     except ImportError as exc:
@@ -111,7 +193,7 @@ def _post_offer(auth: ChatGPTAuthConfig, impersonate: str, offer: str, voice: st
     if not auth.access_token:
         raise VoiceSignallingError("ChatGPT account has no access token", 401)
     timezone = local_timezone_payload()
-    voice_id = str(uuid.uuid4()).upper()
+    voice_id = upstream_session_id or str(uuid.uuid4()).upper()
     session = {
         "voice": voice,
         "voice_mode": "wingman",
@@ -119,14 +201,20 @@ def _post_offer(auth: ChatGPTAuthConfig, impersonate: str, offer: str, voice: st
         "voice_status_request_id": voice_id,
         "backend_reasoning_effort": "instant",
         "language_code": "auto",
+        # Chat model slugs can be accepted by /wm yet leave a silent voice call.
+        # Keep GPT Live selection with ChatGPT; model applies to the text preflight.
         "requested_default_model": "",
         "model_slug": "",
         "model_slug_advanced": "",
         "client_tools": [],
-        "conversation_mode": {"kind": "primary_assistant"},
+        "conversation_mode": conversation_mode(project_id),
         "enable_message_streaming": True,
         **timezone,
     }
+    if conversation_id:
+        session["conversation_id"] = conversation_id
+    if parent_message_id:
+        session["parent_message_id"] = parent_message_id
     headers = {
         "authorization": f"Bearer {auth.access_token}",
         "origin": "https://chatgpt.com",

@@ -12,8 +12,9 @@
     fieldset { border: 1px solid #354251; border-radius: 12px; padding: 18px; margin: 18px 0; }
     legend { padding: 0 6px; font-weight: 650; }
     label { display: block; margin: 10px 0 5px; }
-    input, select, button { box-sizing: border-box; font: inherit; }
-    input:not([type=file]), select { width: 100%; padding: 10px; color: inherit; background: #1d2732; border: 1px solid #4b5b6b; border-radius: 7px; }
+    input, select, textarea, button { box-sizing: border-box; font: inherit; }
+    input:not([type=file]), select, textarea { width: 100%; padding: 10px; color: inherit; background: #1d2732; border: 1px solid #4b5b6b; border-radius: 7px; }
+    textarea { min-height: 82px; resize: vertical; }
     input[type=file] { max-width: 100%; }
     button { border: 0; border-radius: 7px; padding: 10px 15px; background: #40b9a0; color: #08221c; font-weight: 700; cursor: pointer; }
     button.secondary { background: #344454; color: #edf2f7; }
@@ -28,11 +29,24 @@
 </head>
 <body>
   <h1>Prueba local de voz</h1>
-  <p>El audio viaja por WebRTC entre este navegador y ChatGPT Web. El puente local solo negocia la conexión y conserva la credencial fuera del navegador.</p>
+  <p>El audio viaja por WebRTC entre este navegador y ChatGPT Web. El puente local prepara el contexto y negocia la conexión sin entregar la credencial de ChatGPT al navegador.</p>
   <fieldset>
     <legend>Conexión</legend>
     <label for="key">Clave de este puente local</label>
     <input id="key" type="password" autocomplete="off" placeholder="CHATGPT_API_KEY">
+    <div class="row" style="margin-top:10px"><button id="loadOptions" class="secondary" type="button">Cargar proyectos y modelos</button></div>
+    <label for="project">Proyecto (opcional)</label>
+    <select id="project"><option value="">Fuera de proyectos</option></select>
+    <label for="model">Modelo del mensaje inicial</label>
+    <select id="model"><option value="auto">auto</option></select>
+    <div class="hint">El modelo elegido se usa para el texto inicial. ChatGPT decide el modelo de voz según la cuenta y su disponibilidad.</div>
+    <label for="conversationId">UUID de conversación existente (opcional)</label>
+    <input id="conversationId" placeholder="Vacío = nueva conversación" spellcheck="false">
+    <label for="initialText">Texto inicial (opcional)</label>
+    <textarea id="initialText" placeholder="Mensaje que se enviará antes de abrir el canal de voz"></textarea>
+    <label for="attachments">Adjuntos de texto para el mensaje inicial (opcional)</label>
+    <input id="attachments" type="file" multiple accept=".txt,.md,.csv,.json">
+    <div class="hint">Los adjuntos se envían al mismo chat. El archivo de audio de abajo es la fuente de voz, no un adjunto.</div>
     <label for="voice">Voz</label>
     <select id="voice"><option>cove</option><option>breeze</option><option>ember</option><option>fathom</option><option>glimmer</option><option>juniper</option><option>maple</option><option>orbit</option><option>vale</option></select>
     <label for="source">Entrada de audio</label>
@@ -54,6 +68,7 @@
     <form id="composer" class="row">
       <input id="message" style="flex:1; min-width:220px" placeholder="Escribe un mensaje" disabled>
       <button id="send" disabled>Enviar</button>
+      <input id="messageFiles" type="file" multiple accept=".txt,.md,.csv,.json" disabled aria-label="Adjuntar archivos de texto">
     </form>
     <div id="messages" aria-live="polite"></div>
   </fieldset>
@@ -62,11 +77,56 @@
     const $ = id => document.getElementById(id);
     const state = { pc: null, dc: null, input: null, context: null, decoded: null,
       fileStarted: false, bridgeId: null, active: false, generation: 0, retries: 0,
-      retryTimer: null, disconnectedTimer: null, conversationId: null };
+      retryTimer: null, disconnectedTimer: null, conversationId: null, options: null };
     const status = text => { $('status').textContent = text; };
     const append = text => { $('messages').textContent += text + '\n'; $('messages').scrollTop = $('messages').scrollHeight; };
     const auth = () => ({ 'Authorization': 'Bearer ' + $('key').value.trim(), 'Content-Type': 'application/json' });
     $('source').addEventListener('change', () => { $('fileRow').hidden = $('source').value !== 'file'; });
+
+    function updateComposer() {
+      const available = state.active && (Boolean(state.conversationId) || state.dc?.readyState === 'open');
+      $('message').disabled = $('send').disabled = !available;
+      $('messageFiles').disabled = !state.active || !state.conversationId;
+    }
+
+    async function loadOptions() {
+      if (!$('key').value.trim()) { status('Introduce primero la clave local del puente.'); return; }
+      $('loadOptions').disabled = true;
+      try {
+        const [projectsResponse, modelsResponse] = await Promise.all([
+          fetch('/v1/chatgpt/admin/projects', {headers: auth()}),
+          fetch('/v1/models', {headers: auth()})
+        ]);
+        if (!projectsResponse.ok || !modelsResponse.ok) throw new Error('No se pudieron cargar proyectos o modelos.');
+        const projects = (await projectsResponse.json()).data || [];
+        const models = (await modelsResponse.json()).data || [];
+        $('project').replaceChildren(new Option('Fuera de proyectos', ''));
+        for (const item of projects) $('project').add(new Option(item.name, item.alias));
+        $('model').replaceChildren(new Option('auto', 'auto'));
+        for (const item of models) if (item.id && item.id !== 'auto' && item.id !== 'gpt-image-1' &&
+            item.id !== 'chatgpt-deep-research' && !item.id.includes('@')) {
+          $('model').add(new Option(item.name || item.id, item.id));
+        }
+        status('Opciones cargadas. Puedes iniciar una llamada.');
+      } catch (error) { status(error.message); }
+      finally { $('loadOptions').disabled = false; }
+    }
+
+    async function readFiles(input) {
+      const files = Array.from(input.files || []);
+      if (files.length > 10) throw new Error('Se permiten hasta diez adjuntos.');
+      if (files.some(file => file.size > 20 * 1024 * 1024) || files.reduce((sum, file) => sum + file.size, 0) > 25 * 1024 * 1024) {
+        throw new Error('Los adjuntos superan el límite de 20 MiB por archivo o 25 MiB en total.');
+      }
+      return Promise.all(files.map(file => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({filename: file.name, file_data: String(reader.result).split(',')[1]});
+        reader.onerror = () => reject(new Error('No se pudo leer ' + file.name));
+        reader.readAsDataURL(file);
+      })));
+    }
+
+    $('loadOptions').addEventListener('click', loadOptions);
 
     async function prepareInput() {
       if ($('source').value === 'mic') {
@@ -103,7 +163,11 @@
         try { event = JSON.parse(event.data); } catch { return; }
       }
       const payload = event.payload && typeof event.payload === 'object' ? event.payload : event;
-      if (payload.conversation_id) state.conversationId = payload.conversation_id;
+      if (payload.conversation_id && typeof payload.conversation_id === 'string') {
+        state.conversationId = payload.conversation_id;
+        $('conversationId').value = state.conversationId;
+        updateComposer();
+      }
       if (event.type === 'conversation_update' || payload.type === 'conversation_update') {
         if (state.conversationId) status('Conectado · conversación ' + state.conversationId);
       }
@@ -128,7 +192,7 @@
       if (state.dc) state.dc.close();
       if (state.pc) state.pc.close();
       state.pc = state.dc = null;
-      $('message').disabled = $('send').disabled = true;
+      updateComposer();
     }
 
     function scheduleReconnect(reason) {
@@ -165,26 +229,44 @@
       state.dc = dc;
       let dcOpened = false;
       dc.onmessage = event => handleEvent(event.data);
-      dc.onopen = () => { dcOpened = true; $('message').disabled = $('send').disabled = false; };
+      dc.onopen = () => { dcOpened = true; updateComposer(); };
       dc.onclose = () => {
-        $('message').disabled = $('send').disabled = true;
+        updateComposer();
         if (state.active && pc === state.pc && dcOpened && pc.connectionState !== 'closed') scheduleReconnect('canal de datos');
       };
       await pc.setLocalDescription(await pc.createOffer());
       await waitForIce(pc);
+      const request = state.bridgeId
+        ? {offer_sdp: pc.localDescription.sdp, voice: $('voice').value, bridge_session_id: state.bridgeId}
+        : {...state.options, offer_sdp: pc.localDescription.sdp};
+      if (!state.bridgeId && (request.text || request.files?.length)) status('Creando el mensaje inicial y negociando voz…');
       const response = await fetch('/v1/chatgpt/voice/sessions', {
-        method: 'POST', headers: auth(), body: JSON.stringify({
-          offer_sdp: pc.localDescription.sdp, voice: $('voice').value,
-          bridge_session_id: state.bridgeId
-        })
+        method: 'POST', headers: auth(), body: JSON.stringify(request)
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error?.message || 'Error HTTP ' + response.status);
-      if (!state.active || generation !== state.generation) { pc.close(); return; }
+      if (!state.active || generation !== state.generation) {
+        pc.close();
+        if (data.bridge_session_id) fetch('/v1/chatgpt/voice/sessions/release', {
+          method: 'POST', headers: auth(), body: JSON.stringify({bridge_session_id: data.bridge_session_id})
+        }).catch(() => {});
+        return;
+      }
       state.bridgeId = data.bridge_session_id;
-      // Older embedded Chromium builds cannot parse the optional SCTP SNAP attribute.
-      const answerSdp = data.answer_sdp.replace(/^a=sctp-init:[^\r\n]*(?:\r?\n|$)/gm, '');
-      await pc.setRemoteDescription({type: 'answer', sdp: answerSdp});
+      if (data.conversation_id) {
+        state.conversationId = data.conversation_id;
+        $('conversationId').value = data.conversation_id;
+      }
+      if (data.initial_response) append('ChatGPT: ' + data.initial_response);
+      updateComposer();
+      try {
+        await pc.setRemoteDescription({type: 'answer', sdp: data.answer_sdp});
+      } catch (error) {
+        // Older embedded Chromium builds cannot parse the optional SCTP SNAP attribute.
+        if (!/^a=sctp-init:/m.test(data.answer_sdp)) throw error;
+        const compatibleSdp = data.answer_sdp.replace(/^a=sctp-init:[^\r\n]*(?:\r?\n|$)/gm, '');
+        await pc.setRemoteDescription({type: 'answer', sdp: compatibleSdp});
+      }
       status('Negociado con la cuenta ' + data.account + '. Esperando WebRTC…');
       setTimeout(() => {
         if (state.active && pc === state.pc && pc.connectionState === 'connected' && dc.readyState !== 'open') {
@@ -208,6 +290,7 @@
       state.input = state.context = state.decoded = state.destination = state.bridgeId = null;
       state.fileStarted = false;
       $('start').disabled = false; $('stop').disabled = true;
+      updateComposer();
       status('Desconectado.');
     }
 
@@ -216,19 +299,55 @@
       $('start').disabled = true; $('stop').disabled = false;
       state.active = true; state.retries = 0; state.generation += 1;
       const generation = state.generation;
-      try { status('Preparando audio…'); await prepareInput(); await connectPeer(generation); }
+      try {
+        status('Preparando audio y contexto…');
+        state.conversationId = $('conversationId').value.trim() || null;
+        state.options = {
+          voice: $('voice').value, model: $('model').value,
+          project: $('project').value || undefined,
+          conversation_id: state.conversationId,
+          text: $('initialText').value.trim() || undefined,
+          files: await readFiles($('attachments'))
+        };
+        await prepareInput();
+        await connectPeer(generation);
+      }
       catch (error) { await stop(); status('No se pudo conectar: ' + error.message); }
     });
     $('stop').addEventListener('click', stop);
-    $('composer').addEventListener('submit', event => {
+    $('composer').addEventListener('submit', async event => {
       event.preventDefault();
       const text = $('message').value.trim();
-      if (!text || !state.dc || state.dc.readyState !== 'open') return;
+      if (!text || !state.active) return;
+      $('send').disabled = true;
+      try {
+        const files = await readFiles($('messageFiles'));
+        if (state.conversationId) {
+          const content = files.length
+            ? [{type: 'text', text}, ...files.map(file => ({type: 'file', file}))]
+            : text;
+          const response = await fetch('/v1/chat/completions', {
+            method: 'POST', headers: auth(), body: JSON.stringify({
+              model: state.options.model, conversation_id: state.conversationId,
+              temporary_chat: false, messages: [{role: 'user', content}]
+            })
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error?.message || 'Error HTTP ' + response.status);
+          append('Tú: ' + text);
+          append('ChatGPT: ' + (data.choices?.[0]?.message?.content || '(sin texto)'));
+          $('message').value = ''; $('messageFiles').value = '';
+          return;
+        }
+        if (files.length) throw new Error('Espera a que se conozca el UUID antes de adjuntar archivos.');
+        if (!state.dc || state.dc.readyState !== 'open') throw new Error('No hay canal de datos ni UUID para enviar texto.');
       const message = { id: crypto.randomUUID(), author: {role: 'user'}, create_time: Date.now()/1000,
         content: {content_type: 'text', parts: [text]},
         metadata: {serialization_metadata: {custom_symbol_offsets: []}} };
       state.dc.send(JSON.stringify({type:'data_message', data:JSON.stringify({type:'relay_message', payload:{type:'relay_message', message}})}));
       append('Tú: ' + text); $('message').value = '';
+      } catch (error) { status('No se pudo enviar el mensaje: ' + error.message); }
+      finally { updateComposer(); }
     });
     window.addEventListener('beforeunload', () => { if (state.input) state.input.getTracks().forEach(track => track.stop()); });
   })();
