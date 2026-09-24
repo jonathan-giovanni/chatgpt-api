@@ -308,8 +308,10 @@ Audio request:
 }
 ```
 
-The selected ChatGPT model determines how it analyzes or transcribes the
-uploaded audio. This route does not implement realtime voice or text-to-speech.
+`input_audio` here is uploaded as a generic ChatGPT file attachment, not as a
+speech input. A live WAV probe was accepted but the assistant could not hear
+or transcribe it, so this route must not be used as an STT endpoint. For live
+speech-to-speech, see [Web Voice transport](VOICE_TRANSPORT.md).
 
 Tool calling uses the same route. The bridge asks ChatGPT to emit strict JSON,
 validates the requested tool names, and returns OpenAI-style `tool_calls` for

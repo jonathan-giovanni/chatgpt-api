@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatGPT Web Voice · prueba local</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; background: #11161d; color: #edf2f7; }
+    body { max-width: 720px; margin: 32px auto; padding: 0 20px; }
+    h1 { font-size: 1.55rem; margin-bottom: 4px; }
+    p { color: #aebccb; margin-top: 0; }
+    fieldset { border: 1px solid #354251; border-radius: 12px; padding: 18px; margin: 18px 0; }
+    legend { padding: 0 6px; font-weight: 650; }
+    label { display: block; margin: 10px 0 5px; }
+    input, select, button { box-sizing: border-box; font: inherit; }
+    input:not([type=file]), select { width: 100%; padding: 10px; color: inherit; background: #1d2732; border: 1px solid #4b5b6b; border-radius: 7px; }
+    input[type=file] { max-width: 100%; }
+    button { border: 0; border-radius: 7px; padding: 10px 15px; background: #40b9a0; color: #08221c; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #344454; color: #edf2f7; }
+    button:disabled { opacity: .55; cursor: default; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .hint { font-size: .88rem; color: #aebccb; }
+    #status { min-height: 1.5em; padding: 12px; background: #1d2732; border-radius: 7px; }
+    #remote { width: 100%; margin: 12px 0; }
+    #messages { white-space: pre-wrap; min-height: 3em; max-height: 12em; overflow: auto; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Prueba local de voz</h1>
+  <p>El audio viaja por WebRTC entre este navegador y ChatGPT Web. El puente local solo negocia la conexión y conserva la credencial fuera del navegador.</p>
+  <fieldset>
+    <legend>Conexión</legend>
+    <label for="key">Clave de este puente local</label>
+    <input id="key" type="password" autocomplete="off" placeholder="CHATGPT_API_KEY">
+    <label for="voice">Voz</label>
+    <select id="voice"><option>cove</option><option>breeze</option><option>ember</option><option>fathom</option><option>glimmer</option><option>juniper</option><option>maple</option><option>orbit</option><option>vale</option></select>
+    <label for="source">Entrada de audio</label>
+    <select id="source"><option value="file">Archivo local</option><option value="mic">Micrófono</option></select>
+    <div id="fileRow">
+      <label for="audioFile">Archivo de audio (WAV, MP3 u otro formato compatible con el navegador)</label>
+      <input id="audioFile" type="file" accept="audio/*,.wav,.mp3,.ogg,.m4a">
+      <div class="hint">El archivo se reproduce hacia el canal en tiempo real; no se sube al servidor como adjunto.</div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button id="start">Conectar</button>
+      <button id="stop" class="secondary" disabled>Finalizar</button>
+    </div>
+  </fieldset>
+  <div id="status" role="status" aria-live="polite">Desconectado.</div>
+  <audio id="remote" autoplay controls></audio>
+  <fieldset>
+    <legend>Texto durante la llamada</legend>
+    <form id="composer" class="row">
+      <input id="message" style="flex:1; min-width:220px" placeholder="Escribe un mensaje" disabled>
+      <button id="send" disabled>Enviar</button>
+    </form>
+    <div id="messages" aria-live="polite"></div>
+  </fieldset>
+  <script>
+  (() => {
+    const $ = id => document.getElementById(id);
+    const state = { pc: null, dc: null, input: null, context: null, decoded: null,
+      fileStarted: false, bridgeId: null, active: false, generation: 0, retries: 0,
+      retryTimer: null, disconnectedTimer: null, conversationId: null };
+    const status = text => { $('status').textContent = text; };
+    const append = text => { $('messages').textContent += text + '\n'; $('messages').scrollTop = $('messages').scrollHeight; };
+    const auth = () => ({ 'Authorization': 'Bearer ' + $('key').value.trim(), 'Content-Type': 'application/json' });
+    $('source').addEventListener('change', () => { $('fileRow').hidden = $('source').value !== 'file'; });
+
+    async function prepareInput() {
+      if ($('source').value === 'mic') {
+        state.input = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+        return;
+      }
+      const file = $('audioFile').files[0];
+      if (!file) throw new Error('Selecciona un archivo de audio.');
+      if (file.size > 20 * 1024 * 1024) throw new Error('El archivo supera 20 MiB.');
+      state.context = new AudioContext();
+      state.decoded = await state.context.decodeAudioData(await file.arrayBuffer());
+      if (state.decoded.duration > 300) throw new Error('Usa un archivo de hasta cinco minutos.');
+      const destination = state.context.createMediaStreamDestination();
+      state.input = destination.stream;
+      state.destination = destination;
+      state.fileStarted = false;
+    }
+
+    function startFile() {
+      if (!state.decoded || state.fileStarted || !state.active) return;
+      const source = state.context.createBufferSource();
+      source.buffer = state.decoded;
+      source.connect(state.destination);
+      source.onended = () => status('Archivo terminado. La llamada continúa para texto o nueva conexión.');
+      source.start();
+      state.fileStarted = true;
+      status('Conectado. Reproduciendo archivo por WebRTC.');
+    }
+
+    function handleEvent(raw) {
+      let event;
+      try { event = JSON.parse(raw); } catch { return; }
+      if (event.type === 'data_message' && typeof event.data === 'string') {
+        try { event = JSON.parse(event.data); } catch { return; }
+      }
+      const payload = event.payload && typeof event.payload === 'object' ? event.payload : event;
+      if (payload.conversation_id) state.conversationId = payload.conversation_id;
+      if (event.type === 'conversation_update' || payload.type === 'conversation_update') {
+        if (state.conversationId) status('Conectado · conversación ' + state.conversationId);
+      }
+      if (event.type === 'chat_message_delta' || payload.type === 'chat_message_delta') {
+        const text = payload.delta || payload.text;
+        if (typeof text === 'string' && text.trim()) append(text);
+      }
+    }
+
+    async function waitForIce(pc) {
+      if (pc.iceGatheringState === 'complete') return;
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { pc.removeEventListener('icegatheringstatechange', check); reject(new Error('Tiempo agotado al reunir candidatos ICE.')); }, 12000);
+        function check() { if (pc.iceGatheringState === 'complete') { clearTimeout(timer); pc.removeEventListener('icegatheringstatechange', check); resolve(); } }
+        pc.addEventListener('icegatheringstatechange', check);
+        check();
+      });
+    }
+
+    function closePeer() {
+      clearTimeout(state.disconnectedTimer);
+      if (state.dc) state.dc.close();
+      if (state.pc) state.pc.close();
+      state.pc = state.dc = null;
+      $('message').disabled = $('send').disabled = true;
+    }
+
+    function scheduleReconnect(reason) {
+      if (!state.active || state.retryTimer) return;
+      if (state.retries >= 2) { status('Conexión perdida (' + reason + '). Pulsa Finalizar y vuelve a conectar.'); return; }
+      state.retries += 1;
+      const generation = state.generation;
+      status('Conexión interrumpida. Reconectando ' + state.retries + '/2…');
+      state.retryTimer = setTimeout(async () => {
+        state.retryTimer = null;
+        if (!state.active || generation !== state.generation) return;
+        closePeer();
+        try { await connectPeer(generation); } catch (error) { scheduleReconnect(error.message); }
+      }, 1000 * state.retries);
+    }
+
+    async function connectPeer(generation) {
+      const pc = new RTCPeerConnection({bundlePolicy: 'max-bundle'});
+      state.pc = pc;
+      pc.addTrack(state.input.getAudioTracks()[0], state.input);
+      pc.ontrack = event => {
+        $('remote').srcObject = event.streams[0] || new MediaStream([event.track]);
+        $('remote').play().catch(() => status('Conectado. Pulsa reproducir para oír la respuesta.'));
+      };
+      pc.onconnectionstatechange = () => {
+        if (!state.active || generation !== state.generation) return;
+        if (pc.connectionState === 'connected') { clearTimeout(state.disconnectedTimer); status('Conectado por WebRTC.'); startFile(); }
+        if (pc.connectionState === 'failed') scheduleReconnect('WebRTC');
+        if (pc.connectionState === 'disconnected') state.disconnectedTimer = setTimeout(() => {
+          if (pc.connectionState === 'disconnected') scheduleReconnect('red');
+        }, 4000);
+      };
+      const dc = pc.createDataChannel('oai-events', {negotiated: true, id: 0});
+      state.dc = dc;
+      let dcOpened = false;
+      dc.onmessage = event => handleEvent(event.data);
+      dc.onopen = () => { dcOpened = true; $('message').disabled = $('send').disabled = false; };
+      dc.onclose = () => {
+        $('message').disabled = $('send').disabled = true;
+        if (state.active && pc === state.pc && dcOpened && pc.connectionState !== 'closed') scheduleReconnect('canal de datos');
+      };
+      await pc.setLocalDescription(await pc.createOffer());
+      await waitForIce(pc);
+      const response = await fetch('/v1/chatgpt/voice/sessions', {
+        method: 'POST', headers: auth(), body: JSON.stringify({
+          offer_sdp: pc.localDescription.sdp, voice: $('voice').value,
+          bridge_session_id: state.bridgeId
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message || 'Error HTTP ' + response.status);
+      if (!state.active || generation !== state.generation) { pc.close(); return; }
+      state.bridgeId = data.bridge_session_id;
+      // Older embedded Chromium builds cannot parse the optional SCTP SNAP attribute.
+      const answerSdp = data.answer_sdp.replace(/^a=sctp-init:[^\r\n]*(?:\r?\n|$)/gm, '');
+      await pc.setRemoteDescription({type: 'answer', sdp: answerSdp});
+      status('Negociado con la cuenta ' + data.account + '. Esperando WebRTC…');
+      setTimeout(() => {
+        if (state.active && pc === state.pc && pc.connectionState === 'connected' && dc.readyState !== 'open') {
+          status('Audio conectado. Este navegador no abrió el canal de datos para texto y subtítulos.');
+        }
+      }, 8000);
+    }
+
+    async function stop() {
+      state.active = false;
+      state.generation += 1;
+      clearTimeout(state.retryTimer);
+      clearTimeout(state.disconnectedTimer);
+      closePeer();
+      if (state.input) state.input.getTracks().forEach(track => track.stop());
+      if (state.context) await state.context.close();
+      $('remote').srcObject = null;
+      if (state.bridgeId) fetch('/v1/chatgpt/voice/sessions/release', {
+        method: 'POST', headers: auth(), body: JSON.stringify({bridge_session_id: state.bridgeId}), keepalive: true
+      }).catch(() => {});
+      state.input = state.context = state.decoded = state.destination = state.bridgeId = null;
+      state.fileStarted = false;
+      $('start').disabled = false; $('stop').disabled = true;
+      status('Desconectado.');
+    }
+
+    $('start').addEventListener('click', async () => {
+      if (!$('key').value.trim()) { status('Introduce la clave local del puente.'); return; }
+      $('start').disabled = true; $('stop').disabled = false;
+      state.active = true; state.retries = 0; state.generation += 1;
+      const generation = state.generation;
+      try { status('Preparando audio…'); await prepareInput(); await connectPeer(generation); }
+      catch (error) { await stop(); status('No se pudo conectar: ' + error.message); }
+    });
+    $('stop').addEventListener('click', stop);
+    $('composer').addEventListener('submit', event => {
+      event.preventDefault();
+      const text = $('message').value.trim();
+      if (!text || !state.dc || state.dc.readyState !== 'open') return;
+      const message = { id: crypto.randomUUID(), author: {role: 'user'}, create_time: Date.now()/1000,
+        content: {content_type: 'text', parts: [text]},
+        metadata: {serialization_metadata: {custom_symbol_offsets: []}} };
+      state.dc.send(JSON.stringify({type:'data_message', data:JSON.stringify({type:'relay_message', payload:{type:'relay_message', message}})}));
+      append('Tú: ' + text); $('message').value = '';
+    });
+    window.addEventListener('beforeunload', () => { if (state.input) state.input.getTracks().forEach(track => track.stop()); });
+  })();
+  </script>
+</body>
+</html>

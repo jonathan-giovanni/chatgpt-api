@@ -25,3 +25,6 @@ chatgpt-api = "chatgpt_api.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["chatgpt_api*"]
+
+[tool.setuptools.package-data]
+"chatgpt_api.api" = ["voice.html"]

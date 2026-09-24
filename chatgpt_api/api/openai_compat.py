@@ -69,6 +69,7 @@ from chatgpt_api.providers.chatgpt.projects import (
     validate_project_mapping,
 )
 from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport
+from chatgpt_api.providers.chatgpt.voice import VoiceSignallingError, negotiate_voice, release_session
 
 
 
@@ -891,6 +892,15 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             if path == "/admin" or path == "/admin/":
                 _send_console_redirect(self, config)
                 return
+            if path == "/voice" or path == "/voice/":
+                page = Path(__file__).with_name("voice.html").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+                return
             if path.startswith("/admin/"):
                 _send_json(
                     self,
@@ -963,6 +973,37 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             if not _authorize(self, config.api_key):
                 return
             path = urlparse(self.path).path
+            if path in {"/v1/chatgpt/voice/sessions", "/v1/chatgpt/voice/sessions/release"}:
+                try:
+                    body = _read_json_body(self)
+                    if path.endswith("/release"):
+                        result = {"released": release_session(body.get("bridge_session_id"))}
+                    else:
+                        def load_voice_auth(account: str) -> tuple[ChatGPTAuthConfig, str]:
+                            provider = _provider_for_account(config, account)
+                            return provider.transport.auth, provider.transport.impersonate
+
+                        answer = negotiate_voice(
+                            offer_sdp=body.get("offer_sdp"),
+                            voice=body.get("voice", "cove"),
+                            bridge_session_id=body.get("bridge_session_id"),
+                            account_order=router.order(),
+                            load_auth=load_voice_auth,
+                        )
+                        result = {
+                            "answer_sdp": answer.answer_sdp,
+                            "bridge_session_id": answer.bridge_session_id,
+                            "account": answer.account,
+                        }
+                    _send_json(self, 200, result)
+                except VoiceSignallingError as exc:
+                    _send_json(self, exc.status, {"error": {"message": str(exc), "type": "voice_signalling_error"}})
+                except ProviderError as exc:
+                    status, payload = _provider_error_status_and_payload(exc)
+                    _send_json(self, status, payload)
+                except ValueError as exc:
+                    _send_json(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                return
             operation_id = _cancel_operation_id_from_path(path)
             if operation_id:
                 status, payload = _cancel_chatgpt_operation(operation_id)

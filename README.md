@@ -119,8 +119,9 @@ downloads, and developer tooling.
 Recent project updates include:
 
 - **Model discovery and Project routing:** modernizes model metadata and lets new chats target an optional ChatGPT Project.
-- **Text and audio uploads:** supports bounded text-file and WAV/MP3 attachments for new chats.
+- **Text and audio attachments:** accepts bounded text-file and WAV/MP3 attachments for new chats. Audio files sent this way are generic attachments and do not guarantee transcription.
 - **Conversation continuity:** returns a conversation UUID and accepts it on later requests to continue the same ChatGPT conversation, preserving its account and Project routing.
+- **Experimental Web Voice:** `/voice` connects a local audio file or microphone to ChatGPT Web over WebRTC, with server-side SDP signalling and no browser exposure of the ChatGPT credential. See [voice transport](docs/VOICE_TRANSPORT.md) for setup and limits.
 
 ## Latest Validation Snapshot
 
