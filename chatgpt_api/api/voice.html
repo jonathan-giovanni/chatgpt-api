@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatGPT Web Voice · prueba local</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; background: #11161d; color: #edf2f7; }
+    body { max-width: 720px; margin: 32px auto; padding: 0 20px; }
+    h1 { font-size: 1.55rem; margin-bottom: 4px; }
+    p { color: #aebccb; margin-top: 0; }
+    fieldset { border: 1px solid #354251; border-radius: 12px; padding: 18px; margin: 18px 0; }
+    legend { padding: 0 6px; font-weight: 650; }
+    label { display: block; margin: 10px 0 5px; }
+    input, select, textarea, button { box-sizing: border-box; font: inherit; }
+    input:not([type=file]), select, textarea { width: 100%; padding: 10px; color: inherit; background: #1d2732; border: 1px solid #4b5b6b; border-radius: 7px; }
+    textarea { min-height: 82px; resize: vertical; }
+    input[type=file] { max-width: 100%; }
+    button { border: 0; border-radius: 7px; padding: 10px 15px; background: #40b9a0; color: #08221c; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #344454; color: #edf2f7; }
+    button:disabled { opacity: .55; cursor: default; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .hint { font-size: .88rem; color: #aebccb; }
+    #status { min-height: 1.5em; padding: 12px; background: #1d2732; border-radius: 7px; }
+    #remote { width: 100%; margin: 12px 0; }
+    #messages { white-space: pre-wrap; min-height: 3em; max-height: 12em; overflow: auto; }
+    pre { overflow-x: auto; padding: 12px; background: #0b1016; border-radius: 7px; color: #d9e7f5; }
+    details { margin: 18px 0; padding: 14px 18px; background: #1d2732; border-radius: 10px; }
+    summary { cursor: pointer; font-weight: 650; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Prueba local de voz</h1>
+  <p>El audio viaja por WebRTC entre este navegador y ChatGPT Web. El puente local prepara el contexto y negocia la conexión sin entregar la credencial de ChatGPT al navegador.</p>
+  <fieldset>
+    <legend>Conexión</legend>
+    <label for="key">Clave de este puente local</label>
+    <input id="key" type="password" autocomplete="off" placeholder="CHATGPT_API_KEY">
+    <div class="row" style="margin-top:10px"><button id="loadOptions" class="secondary" type="button">Cargar proyectos y modelos</button></div>
+    <label for="project">Proyecto (opcional)</label>
+    <select id="project"><option value="">Fuera de proyectos</option></select>
+    <label for="model">Modelo del mensaje inicial</label>
+    <select id="model"><option value="auto">auto</option></select>
+    <div class="hint">El modelo elegido se usa para el texto inicial. ChatGPT decide el modelo de voz según la cuenta y su disponibilidad.</div>
+    <label for="conversationId">UUID de conversación existente (opcional)</label>
+    <input id="conversationId" placeholder="Vacío = nueva conversación" spellcheck="false">
+    <label for="initialText">Texto inicial (opcional)</label>
+    <textarea id="initialText" placeholder="Mensaje que se enviará antes de abrir el canal de voz"></textarea>
+    <label for="attachments">Adjuntos de texto para el mensaje inicial (opcional)</label>
+    <input id="attachments" type="file" multiple accept=".txt,.md,.csv,.json">
+    <div class="hint">Los adjuntos se envían al mismo chat. El archivo de audio de abajo es la fuente de voz, no un adjunto.</div>
+    <label for="voice">Voz</label>
+    <select id="voice"><option value="fathom">Arbor (predeterminada)</option><option value="breeze">Breeze</option><option value="ember">Ember</option><option value="glimmer">Sol</option><option value="cove">Cove</option><option value="orbit">Spruce</option><option value="vale">Vale</option><option value="maple">Maple</option><option value="juniper">Juniper</option></select>
+    <label for="source">Entrada de audio</label>
+    <select id="source"><option value="file">Archivo local</option><option value="mic">Micrófono</option></select>
+    <div id="fileRow">
+      <label for="audioFile">Archivo de audio (WAV, MP3 u otro formato compatible con el navegador)</label>
+      <input id="audioFile" type="file" accept="audio/*,.wav,.mp3,.ogg,.m4a">
+      <div class="hint">El archivo se reproduce hacia el canal en tiempo real; no se sube al servidor como adjunto.</div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button id="start">Conectar</button>
+      <button id="stop" class="secondary" disabled>Finalizar</button>
+    </div>
+  </fieldset>
+  <div id="status" role="status" aria-live="polite">Desconectado.</div>
+  <audio id="remote" autoplay controls></audio>
+  <fieldset>
+    <legend>Texto durante la llamada</legend>
+    <form id="composer" class="row">
+      <input id="message" style="flex:1; min-width:220px" placeholder="Escribe un mensaje" disabled>
+      <button id="send" disabled>Enviar</button>
+      <input id="messageFiles" type="file" multiple accept=".txt,.md,.csv,.json" disabled aria-label="Adjuntar archivos de texto">
+    </form>
+    <div id="messages" aria-live="polite"></div>
+  </fieldset>
+  <details>
+    <summary>Prueba local SIP/RTP paso a paso</summary>
+    <p>El flujo principal está en el wrapper Bridge Console, dentro de Test Lab. Desde esta página heredada puedes lanzar el gateway Docker y conectar un cliente SIP local. Requiere una cuenta ChatGPT configurada en el puente.</p>
+    <p><strong>1. En la terminal A, desde la raíz del repositorio, inicia el gateway</strong>. Docker toma la clave, la URL del puente y los puertos por defecto:</p>
+    <pre><code>docker compose run --rm --build --service-ports sip-gateway</code></pre>
+    <p><strong>2. Configura MicroSIP</strong> con servidor <code>127.0.0.1</code>, usuario <code>voice</code>, UDP <code>5060</code>, sin clave; desactiva STUN/SRTP y habilita PCMU.</p>
+    <p><strong>3. Para validar transporte automáticamente, ejecuta el cliente de prueba</strong> (mantén abierto el gateway):</p>
+    <pre><code>uv run --extra sip python scripts/sip_rtp_smoke.py</code></pre>
+    <p>Para probar voz reconocible en lugar del tono de transporte, pasa un WAV PCM hablado corto: <code>uv run --extra sip python scripts/sip_rtp_smoke.py --wav "C:\\ruta\\audio.wav"</code>.</p>
+    <p><strong>Resultado esperado:</strong> SIP <code>INVITE 200 OK</code>, paquetes RTP recibidos y SIP <code>BYE 200</code>. El tono puede recibir silencio y aun así validar transporte; para validar una respuesta de voz, usa WAV hablado y confirma que el pico PCM sea mayor que cero. Con <code>Ctrl+C</code> se detiene el gateway. Los detalles y límites están en <code>docs/VOICE_TRANSPORT.md</code>.</p>
+  </details>
+  <script>
+  (() => {
+    const $ = id => document.getElementById(id);
+    const state = { pc: null, dc: null, input: null, context: null, decoded: null,
+      fileStarted: false, bridgeId: null, active: false, generation: 0, retries: 0,
+      retryTimer: null, disconnectedTimer: null, conversationId: null, options: null };
+    const status = text => { $('status').textContent = text; };
+    const append = text => { $('messages').textContent += text + '\n'; $('messages').scrollTop = $('messages').scrollHeight; };
+    const auth = () => ({ 'Authorization': 'Bearer ' + $('key').value.trim(), 'Content-Type': 'application/json' });
+    $('source').addEventListener('change', () => { $('fileRow').hidden = $('source').value !== 'file'; });
+
+    function updateComposer() {
+      const available = state.active && (Boolean(state.conversationId) || state.dc?.readyState === 'open');
+      $('message').disabled = $('send').disabled = !available;
+      $('messageFiles').disabled = !state.active || !state.conversationId;
+    }
+
+    async function loadOptions() {
+      if (!$('key').value.trim()) { status('Introduce primero la clave local del puente.'); return; }
+      $('loadOptions').disabled = true;
+      try {
+        const [projectsResponse, modelsResponse] = await Promise.all([
+          fetch('/v1/chatgpt/admin/projects', {headers: auth()}),
+          fetch('/v1/models', {headers: auth()})
+        ]);
+        if (!projectsResponse.ok || !modelsResponse.ok) throw new Error('No se pudieron cargar proyectos o modelos.');
+        const projects = (await projectsResponse.json()).data || [];
+        const models = (await modelsResponse.json()).data || [];
+        $('project').replaceChildren(new Option('Fuera de proyectos', ''));
+        for (const item of projects) $('project').add(new Option(item.name, item.alias));
+        $('model').replaceChildren(new Option('auto', 'auto'));
+        for (const item of models) if (item.id && item.id !== 'auto' && item.id !== 'gpt-image-1' &&
+            item.id !== 'chatgpt-deep-research' && !item.id.includes('@')) {
+          $('model').add(new Option(item.name || item.id, item.id));
+        }
+        status('Opciones cargadas. Puedes iniciar una llamada.');
+      } catch (error) { status(error.message); }
+      finally { $('loadOptions').disabled = false; }
+    }
+
+    async function readFiles(input) {
+      const files = Array.from(input.files || []);
+      if (files.length > 10) throw new Error('Se permiten hasta diez adjuntos.');
+      if (files.some(file => file.size > 20 * 1024 * 1024) || files.reduce((sum, file) => sum + file.size, 0) > 25 * 1024 * 1024) {
+        throw new Error('Los adjuntos superan el límite de 20 MiB por archivo o 25 MiB en total.');
+      }
+      return Promise.all(files.map(file => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({filename: file.name, file_data: String(reader.result).split(',')[1]});
+        reader.onerror = () => reject(new Error('No se pudo leer ' + file.name));
+        reader.readAsDataURL(file);
+      })));
+    }
+
+    $('loadOptions').addEventListener('click', loadOptions);
+
+    async function prepareInput() {
+      if ($('source').value === 'mic') {
+        state.input = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+        return;
+      }
+      const file = $('audioFile').files[0];
+      if (!file) throw new Error('Selecciona un archivo de audio.');
+      if (file.size > 20 * 1024 * 1024) throw new Error('El archivo supera 20 MiB.');
+      state.context = new AudioContext();
+      state.decoded = await state.context.decodeAudioData(await file.arrayBuffer());
+      if (state.decoded.duration > 300) throw new Error('Usa un archivo de hasta cinco minutos.');
+      const destination = state.context.createMediaStreamDestination();
+      state.input = destination.stream;
+      state.destination = destination;
+      state.fileStarted = false;
+    }
+
+    function startFile() {
+      if (!state.decoded || state.fileStarted || !state.active) return;
+      const source = state.context.createBufferSource();
+      source.buffer = state.decoded;
+      source.connect(state.destination);
+      source.onended = () => status('Archivo terminado. La llamada continúa para texto o nueva conexión.');
+      source.start();
+      state.fileStarted = true;
+      status('Conectado. Reproduciendo archivo por WebRTC.');
+    }
+
+    function handleEvent(raw) {
+      let event;
+      try { event = JSON.parse(raw); } catch { return; }
+      if (event.type === 'data_message' && typeof event.data === 'string') {
+        try { event = JSON.parse(event.data); } catch { return; }
+      }
+      const payload = event.payload && typeof event.payload === 'object' ? event.payload : event;
+      if (payload.conversation_id && typeof payload.conversation_id === 'string') {
+        state.conversationId = payload.conversation_id;
+        $('conversationId').value = state.conversationId;
+        updateComposer();
+      }
+      if (event.type === 'conversation_update' || payload.type === 'conversation_update') {
+        if (state.conversationId) status('Conectado · conversación ' + state.conversationId);
+      }
+      if (event.type === 'chat_message_delta' || payload.type === 'chat_message_delta') {
+        const text = payload.delta || payload.text;
+        if (typeof text === 'string' && text.trim()) append(text);
+      }
+    }
+
+    async function waitForIce(pc) {
+      if (pc.iceGatheringState === 'complete') return;
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { pc.removeEventListener('icegatheringstatechange', check); reject(new Error('Tiempo agotado al reunir candidatos ICE.')); }, 12000);
+        function check() { if (pc.iceGatheringState === 'complete') { clearTimeout(timer); pc.removeEventListener('icegatheringstatechange', check); resolve(); } }
+        pc.addEventListener('icegatheringstatechange', check);
+        check();
+      });
+    }
+
+    function closePeer() {
+      clearTimeout(state.disconnectedTimer);
+      if (state.dc) state.dc.close();
+      if (state.pc) state.pc.close();
+      state.pc = state.dc = null;
+      updateComposer();
+    }
+
+    function scheduleReconnect(reason) {
+      if (!state.active || state.retryTimer) return;
+      if (state.retries >= 2) { status('Conexión perdida (' + reason + '). Pulsa Finalizar y vuelve a conectar.'); return; }
+      state.retries += 1;
+      const generation = state.generation;
+      status('Conexión interrumpida. Reconectando ' + state.retries + '/2…');
+      state.retryTimer = setTimeout(async () => {
+        state.retryTimer = null;
+        if (!state.active || generation !== state.generation) return;
+        closePeer();
+        try { await connectPeer(generation); } catch (error) { scheduleReconnect(error.message); }
+      }, 1000 * state.retries);
+    }
+
+    async function connectPeer(generation) {
+      const pc = new RTCPeerConnection({bundlePolicy: 'max-bundle'});
+      state.pc = pc;
+      pc.addTrack(state.input.getAudioTracks()[0], state.input);
+      pc.ontrack = event => {
+        $('remote').srcObject = event.streams[0] || new MediaStream([event.track]);
+        $('remote').play().catch(() => status('Conectado. Pulsa reproducir para oír la respuesta.'));
+      };
+      pc.onconnectionstatechange = () => {
+        if (!state.active || generation !== state.generation) return;
+        if (pc.connectionState === 'connected') { clearTimeout(state.disconnectedTimer); status('Conectado por WebRTC.'); startFile(); }
+        if (pc.connectionState === 'failed') scheduleReconnect('WebRTC');
+        if (pc.connectionState === 'disconnected') state.disconnectedTimer = setTimeout(() => {
+          if (pc.connectionState === 'disconnected') scheduleReconnect('red');
+        }, 4000);
+      };
+      const dc = pc.createDataChannel('oai-events', {negotiated: true, id: 0});
+      state.dc = dc;
+      let dcOpened = false;
+      dc.onmessage = event => handleEvent(event.data);
+      dc.onopen = () => { dcOpened = true; updateComposer(); };
+      dc.onclose = () => {
+        updateComposer();
+        if (state.active && pc === state.pc && dcOpened && pc.connectionState !== 'closed') scheduleReconnect('canal de datos');
+      };
+      await pc.setLocalDescription(await pc.createOffer());
+      await waitForIce(pc);
+      const request = state.bridgeId
+        ? {offer_sdp: pc.localDescription.sdp, voice: $('voice').value, bridge_session_id: state.bridgeId}
+        : {...state.options, offer_sdp: pc.localDescription.sdp};
+      if (!state.bridgeId && (request.text || request.files?.length)) status('Creando el mensaje inicial y negociando voz…');
+      const response = await fetch('/v1/chatgpt/voice/sessions', {
+        method: 'POST', headers: auth(), body: JSON.stringify(request)
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message || 'Error HTTP ' + response.status);
+      if (!state.active || generation !== state.generation) {
+        pc.close();
+        if (data.bridge_session_id) fetch('/v1/chatgpt/voice/sessions/release', {
+          method: 'POST', headers: auth(), body: JSON.stringify({bridge_session_id: data.bridge_session_id})
+        }).catch(() => {});
+        return;
+      }
+      state.bridgeId = data.bridge_session_id;
+      if (data.conversation_id) {
+        state.conversationId = data.conversation_id;
+        $('conversationId').value = data.conversation_id;
+      }
+      if (data.initial_response) append('ChatGPT: ' + data.initial_response);
+      updateComposer();
+      try {
+        await pc.setRemoteDescription({type: 'answer', sdp: data.answer_sdp});
+      } catch (error) {
+        // Older embedded Chromium builds cannot parse the optional SCTP SNAP attribute.
+        if (!/^a=sctp-init:/m.test(data.answer_sdp)) throw error;
+        const compatibleSdp = data.answer_sdp.replace(/^a=sctp-init:[^\r\n]*(?:\r?\n|$)/gm, '');
+        await pc.setRemoteDescription({type: 'answer', sdp: compatibleSdp});
+      }
+      status('Negociado con la cuenta ' + data.account + '. Esperando WebRTC…');
+      setTimeout(() => {
+        if (state.active && pc === state.pc && pc.connectionState === 'connected' && dc.readyState !== 'open') {
+          status('Audio conectado. Este navegador no abrió el canal de datos para texto y subtítulos.');
+        }
+      }, 8000);
+    }
+
+    async function stop() {
+      state.active = false;
+      state.generation += 1;
+      clearTimeout(state.retryTimer);
+      clearTimeout(state.disconnectedTimer);
+      closePeer();
+      if (state.input) state.input.getTracks().forEach(track => track.stop());
+      if (state.context) await state.context.close();
+      $('remote').srcObject = null;
+      if (state.bridgeId) fetch('/v1/chatgpt/voice/sessions/release', {
+        method: 'POST', headers: auth(), body: JSON.stringify({bridge_session_id: state.bridgeId}), keepalive: true
+      }).catch(() => {});
+      state.input = state.context = state.decoded = state.destination = state.bridgeId = null;
+      state.fileStarted = false;
+      $('start').disabled = false; $('stop').disabled = true;
+      updateComposer();
+      status('Desconectado.');
+    }
+
+    $('start').addEventListener('click', async () => {
+      if (!$('key').value.trim()) { status('Introduce la clave local del puente.'); return; }
+      $('start').disabled = true; $('stop').disabled = false;
+      state.active = true; state.retries = 0; state.generation += 1;
+      const generation = state.generation;
+      try {
+        status('Preparando audio y contexto…');
+        state.conversationId = $('conversationId').value.trim() || null;
+        state.options = {
+          voice: $('voice').value, model: $('model').value,
+          project: $('project').value || undefined,
+          conversation_id: state.conversationId,
+          text: $('initialText').value.trim() || undefined,
+          files: await readFiles($('attachments'))
+        };
+        await prepareInput();
+        await connectPeer(generation);
+      }
+      catch (error) { await stop(); status('No se pudo conectar: ' + error.message); }
+    });
+    $('stop').addEventListener('click', stop);
+    $('composer').addEventListener('submit', async event => {
+      event.preventDefault();
+      const text = $('message').value.trim();
+      if (!text || !state.active) return;
+      $('send').disabled = true;
+      try {
+        const files = await readFiles($('messageFiles'));
+        if (state.conversationId) {
+          const content = files.length
+            ? [{type: 'text', text}, ...files.map(file => ({type: 'file', file}))]
+            : text;
+          const response = await fetch('/v1/chat/completions', {
+            method: 'POST', headers: auth(), body: JSON.stringify({
+              model: state.options.model, conversation_id: state.conversationId,
+              temporary_chat: false, messages: [{role: 'user', content}]
+            })
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error?.message || 'Error HTTP ' + response.status);
+          append('Tú: ' + text);
+          append('ChatGPT: ' + (data.choices?.[0]?.message?.content || '(sin texto)'));
+          $('message').value = ''; $('messageFiles').value = '';
+          return;
+        }
+        if (files.length) throw new Error('Espera a que se conozca el UUID antes de adjuntar archivos.');
+        if (!state.dc || state.dc.readyState !== 'open') throw new Error('No hay canal de datos ni UUID para enviar texto.');
+      const message = { id: crypto.randomUUID(), author: {role: 'user'}, create_time: Date.now()/1000,
+        content: {content_type: 'text', parts: [text]},
+        metadata: {serialization_metadata: {custom_symbol_offsets: []}} };
+      state.dc.send(JSON.stringify({type:'data_message', data:JSON.stringify({type:'relay_message', payload:{type:'relay_message', message}})}));
+      append('Tú: ' + text); $('message').value = '';
+      } catch (error) { status('No se pudo enviar el mensaje: ' + error.message); }
+      finally { updateComposer(); }
+    });
+    window.addEventListener('beforeunload', () => { if (state.input) state.input.getTracks().forEach(track => track.stop()); });
+  })();
+  </script>
+</body>
+</html>

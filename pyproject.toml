@@ -19,9 +19,16 @@ dependencies = [
 dev = [
   "pytest>=8",
 ]
+sip = [
+  "aiortc>=1.15,<2",
+]
 
 [project.scripts]
 chatgpt-api = "chatgpt_api.cli:main"
+chatgpt-sip = "chatgpt_api.providers.chatgpt.sip_gateway:main"
 
 [tool.setuptools.packages.find]
 include = ["chatgpt_api*"]
+
+[tool.setuptools.package-data]
+"chatgpt_api.api" = ["voice.html"]

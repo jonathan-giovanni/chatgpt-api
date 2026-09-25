@@ -241,13 +241,13 @@ new messages need to be included:
 The bridge stores the latest parent message and original account in its local
 SQLite database. Project conversations also remain attached to their original
 Project. An unknown UUID is rejected instead of silently creating a different
-conversation. Continuations currently support ordinary chat without tools,
-agent mode, Deep Research, or new file attachments.
+conversation. Continuations currently support ordinary chat and bounded file
+attachments, without tools, agent mode, or Deep Research.
 
 ### Text and audio attachments
 
-`POST /v1/chat/completions` accepts inline text files and audio in a new user
-conversation. The bridge uploads each attachment to ChatGPT and keeps the
+`POST /v1/chat/completions` accepts inline text files and audio in ordinary
+new or existing conversations. The bridge uploads each attachment to ChatGPT and keeps the
 normal optional `chatgpt_project` routing field.
 
 Supported inputs:
@@ -258,7 +258,7 @@ Supported inputs:
 
 The bridge accepts at most 10 attachments, 20 MiB per attachment, and 25 MiB
 combined. These are conservative bridge limits. Inline `file_id` references,
-continuations, Deep Research, tools, and agent mode are rejected for requests
+Deep Research, tools, and agent mode are rejected for requests
 with files so an attachment is never silently discarded.
 
 Text-file request:
@@ -308,8 +308,10 @@ Audio request:
 }
 ```
 
-The selected ChatGPT model determines how it analyzes or transcribes the
-uploaded audio. This route does not implement realtime voice or text-to-speech.
+`input_audio` here is uploaded as a generic ChatGPT file attachment, not as a
+speech input. A live WAV probe was accepted but the assistant could not hear
+or transcribe it, so this route must not be used as an STT endpoint. For live
+speech-to-speech, see [Web Voice transport](VOICE_TRANSPORT.md).
 
 Tool calling uses the same route. The bridge asks ChatGPT to emit strict JSON,
 validates the requested tool names, and returns OpenAI-style `tool_calls` for

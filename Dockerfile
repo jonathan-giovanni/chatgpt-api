@@ -1,4 +1,7 @@
+ARG INSTALL_SIP=false
+
 FROM python:3.12-slim AS build
+ARG INSTALL_SIP
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_ROOT_USER_ACTION=ignore
@@ -9,9 +12,14 @@ COPY pyproject.toml README.md ./
 COPY chatgpt_api ./chatgpt_api
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip wheel --wheel-dir /wheels .
+    && if [ "$INSTALL_SIP" = "true" ]; then \
+        python -m pip wheel --wheel-dir /wheels ".[sip]"; \
+    else \
+        python -m pip wheel --wheel-dir /wheels .; \
+    fi
 
 FROM python:3.12-slim AS runtime
+ARG INSTALL_SIP
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -44,7 +52,11 @@ RUN useradd --create-home --uid 10001 appuser
 COPY --from=build /wheels /wheels
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install --no-index --find-links=/wheels chatgpt-api \
+    && if [ "$INSTALL_SIP" = "true" ]; then \
+        python -m pip install --no-index --find-links=/wheels "chatgpt-api[sip]"; \
+    else \
+        python -m pip install --no-index --find-links=/wheels chatgpt-api; \
+    fi \
     && rm -rf /wheels
 
 RUN mkdir -p /data/secrets/accounts /data/outputs/chatgpt-images /data/outputs/chatgpt-research \
