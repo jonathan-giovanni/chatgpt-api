@@ -121,7 +121,7 @@ Recent project updates include:
 - **Model discovery and Project routing:** modernizes model metadata and lets new chats target an optional ChatGPT Project.
 - **Text and audio attachments:** accepts bounded text-file and WAV/MP3 attachments in ordinary chats, including existing conversations. Audio files sent this way are generic attachments and do not guarantee transcription.
 - **Conversation continuity:** returns a conversation UUID and accepts it on later requests to continue the same ChatGPT conversation, preserving its account and Project routing.
-- **Experimental Web Voice and SIP/RTP:** the Bridge Console Test Lab now includes a WebRTC voice panel wired to the chat test's selected Project, model, conversation UUID, initial text, and text attachments. It accepts a local audio file or microphone; an optional one-call SIP/PCMU gateway uses the same voice API. Voice-model selection remains automatic. See [voice transport](docs/VOICE_TRANSPORT.md) for setup and limits.
+- **Experimental Web Voice and SIP/RTP:** the Bridge Console Test Lab now includes a WebRTC voice panel wired to the chat test's selected Project, model, conversation UUID, initial text, and text attachments. It accepts a local audio file or microphone, detects audio-track closure and ends idle calls after 30 seconds without voice activity, without adding messages to the chat. The optional SIP/PCMU gateway runs in Docker with Compose credentials and standard local ports. Voice-model selection remains automatic. See [voice transport](docs/VOICE_TRANSPORT.md) for setup and limits.
 
 ## Latest Validation Snapshot
 
@@ -129,11 +129,13 @@ These checks were run locally on 2026-09-25 for Web Voice and SIP/RTP:
 
 | Check | Result |
 | --- | --- |
-| Python full suite in Linux Docker | `251 passed` |
+| Python full suite in Linux Docker | `254 passed` |
+| SIP gateway image and Compose wiring | image builds with the SIP extra; local UDP 5060/40000 start without manual key or bridge URL |
 | Bridge Console Test Lab integration | shared Project selection appeared in the WebRTC panel and request preview |
 | Browser WebRTC call with a local WAV and initial text | remote audio track played; conversation UUID returned |
 | Project and attachment continuation | upstream Project association confirmed; later text-file reply stayed in the same UUID |
 | Local SIP/PCMU call with spoken WAV | SIP INVITE/BYE returned `200`; 355 RTP packets sent, 1,537 received with non-silent PCM |
+| Docker SIP/RTP transport smoke | INVITE/BYE returned `200`; 150 RTP packets sent, 1,087 received; the tone validated transport only |
 
 The embedded browser did not open the optional WebRTC DataChannel, so in-call
 captions and DataChannel text are still experimental. Text and text files can

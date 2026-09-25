@@ -8,6 +8,12 @@ attachments. It accepts a local audio file or microphone. The ChatGPT credential
 stays on the bridge. Media flows through WebRTC directly between the peer and
 ChatGPT; the bridge handles only SDP and optional chat preparation.
 
+The wrapper watches local and returned audio without injecting health-check
+messages into the chat. It closes the flow when the remote audio track ends,
+when ChatGPT has no audio response for 30 seconds after a user turn, or after
+30 seconds without voice activity following a response. Failed transport
+reconnects are attempted twice; if they fail, the session is released.
+
 ## Browser test
 
 1. Start both local services: `docker compose up -d --build chatgpt-api bridge-console`.
@@ -88,70 +94,57 @@ timeouts that might duplicate a call.
 
 ## Native SIP/RTP gateway
 
-Install the optional SIP transport and run it next to the local bridge:
+The optional SIP service is packaged with the project. From the repository
+root, start it with one command; Compose passes the bridge URL and key and
+publishes the standard local ports automatically:
 
-```sh
-uv run --extra sip chatgpt-sip --sip-port 5060 --rtp-port 40000
+```powershell
+docker compose run --rm --build --service-ports sip-gateway
 ```
 
-Set `CHATGPT_API_KEY` in the gateway environment to the bridge key first. The
-gateway accepts one SIP/UDP call at a time, answers a PCMU/8000 RTP stream, and
-acts as the WebRTC peer to ChatGPT Web. It supports `OPTIONS`, `INVITE`, `ACK`,
-`CANCEL`, and `BYE`; rejected codecs receive SIP 488 and a second call receives
-486. It sends silence during RTP gaps, bounds its jitter queue, and makes at
-most two WebRTC reconnection attempts using the same bridge session ID. A
-failed call closes rather than silently creating a new chat on another account.
+The Bridge Console command includes the selected project, model, UUID and text.
+The gateway opens UDP 5060 for SIP and UDP 40000 for RTP, bound to loopback.
+MicroSIP can connect directly with server/domain `127.0.0.1`, user `voice`,
+UDP 5060, and no password. Registration is accepted locally without
+authentication; disable STUN and SRTP and enable PCMU (G.711 µ-law, 8 kHz).
+For Asterisk, configure a local static UDP endpoint/trunk to `127.0.0.1:5060`,
+codec `ulaw`, `direct_media=no`, and route an extension through it. The gateway
+does not proxy Asterisk registrations or replace a PBX.
 
-The same initial context can be supplied with `--model`, `--project`,
-`--conversation-id`, `--text`, and repeatable `--attachment path` options.
-Attachments use the same text-file limits as the browser. This gateway is a
-direct SIP user agent, not a registrar or PBX: point a trusted PBX/SIP client
-at its IP and port. It defaults to loopback and accepts only `127.0.0.1`.
-Remote operation requires an explicit `--listen-ip`, `--advertise-ip`, and
-`--allow-ip` CIDR for trusted peers, plus network/firewall protection. The
-gateway has no SIP Digest, TLS, SRTP, NAT traversal, transcoding, or multi-call
-support; use a PBX/SBC for those functions. The bridge bearer key is never sent
-in SIP or RTP.
+The gateway accepts one SIP call at a time and answers PCMU/8000 RTP. It
+supports `OPTIONS`, `REGISTER`, `INVITE`, `ACK`, `CANCEL`, and `BYE`; rejected
+codecs receive SIP 488 and a second call receives 486. It sends silence during
+RTP gaps, bounds its jitter queue, and makes at most two WebRTC reconnection
+attempts using the same bridge session ID. It sends BYE and releases WebRTC if
+the client stops sending RTP or voice activity remains absent for 30 seconds.
 
-### Local SIP/RTP smoke test (Windows PowerShell)
+For a direct CLI run, the same context is available through `--model`,
+`--project`, `--conversation-id`, `--text`, and repeatable `--attachment path`
+options. The Docker service receives the first four from the wrapper command.
+The bridge bearer key is never sent in SIP or RTP. The local gateway has no SIP
+Digest, TLS, SRTP, NAT traversal, transcoding, or multi-call support; use a
+PBX/SBC for those functions, and do not publish its ports outside a trusted
+network.
 
-Run these commands from the repository root in three terminals (the browser is
-optional for this transport check). The local bridge must already have at least
-one valid ChatGPT account configured.
+### SIP/RTP smoke test (optional)
 
-1. Start or rebuild the API bridge:
+With the gateway running, the optional client sends an INVITE, a tone and BYE,
+then reports returned RTP:
 
-   ```powershell
-   docker compose up -d --build chatgpt-api
-   ```
+```powershell
+uv run --extra sip python scripts/sip_rtp_smoke.py
+```
 
-2. In terminal A, start the one-call SIP gateway. Use the same local bridge key
-   configured in Compose; the local default is shown here:
+To validate a spoken turn, pass a short uncompressed PCM WAV (8, 16, 24, or 32
+bit) and confirm the returned PCM peak is nonzero:
 
-   ```powershell
-   $env:CHATGPT_API_KEY = "local-dev-key"
-   uv run --extra sip chatgpt-sip --listen-ip 127.0.0.1 --sip-port 5066 --rtp-port 40006 --text "Responde brevemente en español a la prueba de voz."
-   ```
+```powershell
+uv run --extra sip python scripts/sip_rtp_smoke.py --wav "C:\audio\prueba.wav"
+```
 
-3. In terminal B, run the SIP client, which sends an INVITE, PCMU/8000 RTP and
-   BYE, then reports received return audio:
-
-   ```powershell
-   uv run --extra sip python scripts/sip_rtp_smoke.py
-   ```
-
-   The default 440 Hz tone verifies RTP transport and codec handling. To test a
-   spoken turn, pass a short uncompressed PCM WAV (8, 16, 24, or 32 bit):
-
-   ```powershell
-   uv run --extra sip python scripts/sip_rtp_smoke.py --wav "C:\audio\prueba.wav"
-   ```
-
-4. A successful transport check reports `SIP INVITE: 200 OK`, received RTP
-   packets, and `SIP BYE: 200`. The tone can be treated as noise and receive
-   only silence; that still validates the transport. For a voice check, use a
-   spoken WAV and confirm its PCM peak is greater than zero. `Ctrl+C` stops the
-   gateway. All ports bind to loopback by default.
+The smoke client uses the default ports. `Ctrl+C` releases the active session.
+SIP has no digest auth, TLS or SRTP here; the host ports bind to loopback and
+should not be exposed to an untrusted network.
 
 ## Observed behavior and limits
 

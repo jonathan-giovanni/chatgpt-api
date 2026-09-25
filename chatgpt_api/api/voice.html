@@ -77,13 +77,11 @@
   </fieldset>
   <details>
     <summary>Prueba local SIP/RTP paso a paso</summary>
-    <p>Esta página prueba voz por WebRTC. Para validar un cliente SIP/UDP y audio RTP/PCMU, abre dos terminales además de esta página. El gateway requiere una cuenta ChatGPT ya configurada en el puente local.</p>
-    <p><strong>1. Levanta el puente</strong> (desde la carpeta del repositorio):</p>
-    <pre><code>docker compose up -d --build chatgpt-api</code></pre>
-    <p><strong>2. En la terminal A, inicia el gateway</strong> con la clave que configuraste en Docker Compose. Si no la cambiaste, la clave local es <code>local-dev-key</code>:</p>
-    <pre><code>$env:CHATGPT_API_KEY = "local-dev-key"
-uv run --extra sip chatgpt-sip --listen-ip 127.0.0.1 --sip-port 5066 --rtp-port 40006 --text "Responde brevemente en español a la prueba de voz."</code></pre>
-    <p><strong>3. En la terminal B, ejecuta el cliente de prueba</strong> (mantén abierto el gateway):</p>
+    <p>El flujo principal está en el wrapper Bridge Console, dentro de Test Lab. Desde esta página heredada puedes lanzar el gateway Docker y conectar un cliente SIP local. Requiere una cuenta ChatGPT configurada en el puente.</p>
+    <p><strong>1. En la terminal A, desde la raíz del repositorio, inicia el gateway</strong>. Docker toma la clave, la URL del puente y los puertos por defecto:</p>
+    <pre><code>docker compose run --rm --build --service-ports sip-gateway</code></pre>
+    <p><strong>2. Configura MicroSIP</strong> con servidor <code>127.0.0.1</code>, usuario <code>voice</code>, UDP <code>5060</code>, sin clave; desactiva STUN/SRTP y habilita PCMU.</p>
+    <p><strong>3. Para validar transporte automáticamente, ejecuta el cliente de prueba</strong> (mantén abierto el gateway):</p>
     <pre><code>uv run --extra sip python scripts/sip_rtp_smoke.py</code></pre>
     <p>Para probar voz reconocible en lugar del tono de transporte, pasa un WAV PCM hablado corto: <code>uv run --extra sip python scripts/sip_rtp_smoke.py --wav "C:\\ruta\\audio.wav"</code>.</p>
     <p><strong>Resultado esperado:</strong> SIP <code>INVITE 200 OK</code>, paquetes RTP recibidos y SIP <code>BYE 200</code>. El tono puede recibir silencio y aun así validar transporte; para validar una respuesta de voz, usa WAV hablado y confirma que el pico PCM sea mayor que cero. Con <code>Ctrl+C</code> se detiene el gateway. Los detalles y límites están en <code>docs/VOICE_TRANSPORT.md</code>.</p>

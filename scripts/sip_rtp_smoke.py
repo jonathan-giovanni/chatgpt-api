@@ -166,7 +166,7 @@ def run(args: argparse.Namespace) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prueba local de señalización SIP y audio RTP/PCMU")
     parser.add_argument("--sip-host", default="127.0.0.1")
-    parser.add_argument("--sip-port", type=int, default=5066)
+    parser.add_argument("--sip-port", type=int, default=5060)
     parser.add_argument("--client-sip-port", type=int, default=5068)
     parser.add_argument("--client-rtp-port", type=int, default=18008)
     parser.add_argument("--wav", help="WAV PCM hablado para probar el retorno de voz real")

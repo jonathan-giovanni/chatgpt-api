@@ -34,6 +34,9 @@
   } = $props();
 
   const AUDIO_SIZE_LIMIT = 20 * 1024 * 1024;
+  const VOICE_IDLE_TIMEOUT_MS = 30_000;
+  const INPUT_SILENCE_MS = 900;
+  const OUTPUT_SILENCE_MS = 1_200;
   const TEXT_EXTENSIONS = /\.(txt|md|csv|json)$/i;
   const voices = [
     "cove",
@@ -65,12 +68,21 @@
   let audioContext: AudioContext | null = null;
   let decodedAudio: AudioBuffer | null = null;
   let audioDestination: MediaStreamAudioDestinationNode | null = null;
+  let inputAnalyser: AnalyserNode | null = null;
+  let remoteAnalyser: AnalyserNode | null = null;
+  let remoteAudioSource: MediaStreamAudioSourceNode | null = null;
   let fileStarted = false;
   let bridgeSessionId: string | null = null;
   let generation = 0;
   let retries = 0;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let disconnectedTimer: ReturnType<typeof setTimeout> | null = null;
+  let audioMonitorTimer: ReturnType<typeof setInterval> | null = null;
+  let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastInputActivityAt = 0;
+  let lastRemoteActivityAt = 0;
+  let userTurnPending = false;
+  let remoteWasActive = false;
   let requestOptions: Record<string, unknown> = {};
 
   function append(message: string) {
@@ -83,13 +95,20 @@
 
   const sipGatewayCommand = $derived(
     [
-      "uv run --extra sip chatgpt-sip --listen-ip 127.0.0.1 --sip-port 5066 --rtp-port 40006",
-      projectAlias ? `--project ${powerShellQuote(projectAlias)}` : "",
-      model.trim() ? `--model ${powerShellQuote(model.trim())}` : "",
-      conversationId.trim()
-        ? `--conversation-id ${powerShellQuote(conversationId.trim())}`
+      "docker compose run --rm --build --service-ports",
+      projectAlias
+        ? `-e CHATGPT_SIP_PROJECT=${powerShellQuote(projectAlias)}`
         : "",
-      initialText.trim() ? `--text ${powerShellQuote(initialText.trim())}` : "",
+      model.trim()
+        ? `-e CHATGPT_SIP_MODEL=${powerShellQuote(model.trim())}`
+        : "",
+      conversationId.trim()
+        ? `-e CHATGPT_SIP_CONVERSATION_ID=${powerShellQuote(conversationId.trim())}`
+        : "",
+      initialText.trim()
+        ? `-e CHATGPT_SIP_TEXT=${powerShellQuote(initialText.trim())}`
+        : "",
+      "sip-gateway",
     ]
       .filter(Boolean)
       .join(" "),
@@ -134,6 +153,10 @@
         audio: true,
         video: false,
       });
+      audioContext = new AudioContext();
+      await audioContext.resume();
+      inputAnalyser = createAnalyser(audioContext);
+      audioContext.createMediaStreamSource(inputStream).connect(inputAnalyser);
       return;
     }
     if (!audioFile) throw new Error("Selecciona un archivo de audio.");
@@ -147,7 +170,91 @@
     if (decodedAudio.duration > 300)
       throw new Error("El audio no puede superar cinco minutos.");
     audioDestination = audioContext.createMediaStreamDestination();
+    inputAnalyser = createAnalyser(audioContext);
     inputStream = audioDestination.stream;
+  }
+
+  function createAnalyser(context: AudioContext) {
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 512;
+    const silentOutput = context.createGain();
+    silentOutput.gain.value = 0;
+    analyser.connect(silentOutput);
+    silentOutput.connect(context.destination);
+    return analyser;
+  }
+
+  function clearInactivityTimer() {
+    if (inactivityTimer) clearTimeout(inactivityTimer);
+    inactivityTimer = null;
+  }
+
+  function armInactivityTimer(reason: "response" | "idle") {
+    if (!active || inactivityTimer) return;
+    status =
+      reason === "response"
+        ? "Esperando respuesta de ChatGPT; se cerrará en 30 segundos si no llega audio."
+        : "Sin actividad de voz; el flujo se cerrará en 30 segundos.";
+    inactivityTimer = setTimeout(() => {
+      inactivityTimer = null;
+      void stop(
+        reason === "response"
+          ? "Cerrado: ChatGPT no respondió en 30 segundos."
+          : "Cerrado por 30 segundos sin actividad de voz.",
+      );
+    }, VOICE_IDLE_TIMEOUT_MS);
+  }
+
+  function audioLevel(
+    analyser: AnalyserNode | null,
+    samples: Float32Array<ArrayBuffer>,
+  ) {
+    if (!analyser) return 0;
+    analyser.getFloatTimeDomainData(samples);
+    let energy = 0;
+    for (const sample of samples) energy += sample * sample;
+    return Math.sqrt(energy / samples.length);
+  }
+
+  function startAudioMonitor() {
+    if (audioMonitorTimer || !inputAnalyser) return;
+    const inputSamples = new Float32Array(inputAnalyser.fftSize);
+    const remoteSamples = new Float32Array(512);
+    audioMonitorTimer = setInterval(() => {
+      if (!active) return;
+      const now = Date.now();
+      const inputActive = audioLevel(inputAnalyser, inputSamples) >= 0.012;
+      const remoteActive = audioLevel(remoteAnalyser, remoteSamples) >= 0.006;
+
+      if (inputActive) {
+        lastInputActivityAt = now;
+        userTurnPending = true;
+        clearInactivityTimer();
+      }
+      if (remoteActive) {
+        lastRemoteActivityAt = now;
+        remoteWasActive = true;
+        userTurnPending = false;
+        clearInactivityTimer();
+      }
+
+      if (
+        userTurnPending &&
+        !inputActive &&
+        !remoteActive &&
+        now - lastInputActivityAt >= INPUT_SILENCE_MS
+      ) {
+        armInactivityTimer("response");
+      } else if (
+        remoteWasActive &&
+        !remoteActive &&
+        now - lastRemoteActivityAt >= OUTPUT_SILENCE_MS &&
+        !inputActive &&
+        !userTurnPending
+      ) {
+        armInactivityTimer("idle");
+      }
+    }, 250);
   }
 
   function startAudioFile() {
@@ -162,8 +269,11 @@
     const source = audioContext.createBufferSource();
     source.buffer = decodedAudio;
     source.connect(audioDestination);
+    source.connect(inputAnalyser!);
     source.onended = () => {
-      status = "Archivo terminado. La llamada continúa abierta.";
+      lastInputActivityAt = Date.now();
+      userTurnPending = true;
+      status = "Archivo terminado. Esperando la respuesta de ChatGPT.";
     };
     source.start();
     fileStarted = true;
@@ -227,6 +337,9 @@
   function closePeer() {
     if (disconnectedTimer) clearTimeout(disconnectedTimer);
     disconnectedTimer = null;
+    remoteAudioSource?.disconnect();
+    remoteAudioSource = null;
+    remoteAnalyser = null;
     dataChannel?.close();
     peer?.close();
     dataChannel = null;
@@ -236,7 +349,7 @@
   function scheduleReconnect(reason: string) {
     if (!active || retryTimer) return;
     if (retries >= 2) {
-      status = `Conexión perdida (${reason}). Finaliza y vuelve a conectar.`;
+      void stop(`Flujo cerrado: conexión perdida (${reason}).`);
       return;
     }
     retries += 1;
@@ -262,9 +375,24 @@
     peer = connection;
     connection.addTrack(inputStream.getAudioTracks()[0], inputStream);
     connection.ontrack = (event) => {
+      event.track.addEventListener("ended", () => {
+        if (
+          active &&
+          currentGeneration === generation &&
+          connection === peer &&
+          connection.connectionState !== "closed"
+        )
+          void stop("ChatGPT cerró el canal de audio.");
+      });
       if (!remoteAudio) return;
-      remoteAudio.srcObject =
-        event.streams[0] || new MediaStream([event.track]);
+      const remoteStream = event.streams[0] || new MediaStream([event.track]);
+      remoteAudio.srcObject = remoteStream;
+      if (audioContext) {
+        remoteAudioSource?.disconnect();
+        remoteAnalyser = createAnalyser(audioContext);
+        remoteAudioSource = audioContext.createMediaStreamSource(remoteStream);
+        remoteAudioSource.connect(remoteAnalyser);
+      }
       void remoteAudio.play().catch(() => {
         status = "Conectado. Pulsa reproducir para oír la respuesta.";
       });
@@ -347,6 +475,10 @@
       await connection.setRemoteDescription({ type: "answer", sdp: answer });
     }
     status = `Negociado con ${result.account || "la cuenta configurada"}; esperando WebRTC…`;
+    if (initialText.trim() && !result.initial_response) {
+      lastInputActivityAt = Date.now();
+      userTurnPending = true;
+    }
     setTimeout(() => {
       if (
         active &&
@@ -379,13 +511,16 @@
     }
   }
 
-  async function stop() {
+  async function stop(reason = "Desconectado.") {
     active = false;
     busy = false;
     generation += 1;
     if (retryTimer) clearTimeout(retryTimer);
     if (disconnectedTimer) clearTimeout(disconnectedTimer);
+    if (audioMonitorTimer) clearInterval(audioMonitorTimer);
+    clearInactivityTimer();
     retryTimer = disconnectedTimer = null;
+    audioMonitorTimer = null;
     closePeer();
     inputStream?.getTracks().forEach((track) => track.stop());
     inputStream = null;
@@ -394,11 +529,17 @@
     audioContext = null;
     decodedAudio = null;
     audioDestination = null;
+    remoteAudioSource?.disconnect();
+    remoteAudioSource = null;
+    inputAnalyser = null;
+    remoteAnalyser = null;
+    userTurnPending = false;
+    remoteWasActive = false;
     fileStarted = false;
     if (remoteAudio) remoteAudio.srcObject = null;
     if (bridgeSessionId) void releaseSession(bridgeSessionId);
     bridgeSessionId = null;
-    status = "Desconectado.";
+    status = reason;
   }
 
   async function start() {
@@ -420,6 +561,15 @@
         files: files.length ? files : undefined,
       };
       await prepareInput();
+      inputStream?.getAudioTracks()[0]?.addEventListener(
+        "ended",
+        () => {
+          if (active && currentGeneration === generation)
+            void stop("La fuente de audio local se desconectó.");
+        },
+        { once: true },
+      );
+      startAudioMonitor();
       if (active && currentGeneration === generation)
         await connectPeer(currentGeneration);
     } catch (error) {
@@ -601,7 +751,7 @@
     >
     <button
       class="rounded-xl border border-white/15 px-4 py-3 font-black text-slate-100"
-      onclick={stop}
+      onclick={() => stop()}
       disabled={!active && !busy}>Finalizar</button
     >
   </div>
@@ -660,29 +810,27 @@
       >Probar SIP/RTP desde el wrapper</summary
     >
     <p class="mt-3 text-sm text-slate-400">
-      SIP usa UDP y no puede iniciarse desde una página web. Ejecuta el gateway
-      y el cliente de prueba en dos terminales. Requiere una cuenta ChatGPT
-      configurada y el puente activo.
+      El gateway corre en Docker, hereda la clave y la conexión del proyecto, y
+      abre SIP/RTP solo en este equipo. Conecta MicroSIP a 127.0.0.1:5060/UDP
+      con el usuario «voice» y sin clave. Requiere una cuenta ChatGPT
+      configurada.
     </p>
     <p class="mt-3 text-xs font-black uppercase tracking-wider text-slate-400">
-      Terminal A · gateway local
+      Terminal A · gateway Docker
     </p>
     <pre
-      class="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-3 text-xs text-cyan-100">$env:CHATGPT_API_KEY = "local-dev-key"
-{sipGatewayCommand}</pre>
+      class="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-3 text-xs text-cyan-100">{sipGatewayCommand}</pre>
     <p class="mt-3 text-xs font-black uppercase tracking-wider text-slate-400">
-      Terminal B · cliente de prueba (en la raíz del repositorio)
+      Terminal B · prueba automática opcional
     </p>
     <pre
-      class="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-3 text-xs text-cyan-100">uv run --extra sip python scripts/sip_rtp_smoke.py --wav "C:\ruta\audio.wav"</pre>
+      class="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-3 text-xs text-cyan-100">uv run --extra sip python scripts/sip_rtp_smoke.py</pre>
     <p class="mt-3 text-xs text-slate-400">
       El gateway hereda el proyecto, modelo, UUID y texto seleccionados arriba;
-      el modelo de voz sigue siendo automático. Para archivos en SIP, añade
-      --attachment con su ruta local al comando. Usa WAV PCM hablado corto. Se
-      espera INVITE 200, RTP de retorno con pico PCM mayor que cero y BYE 200.
-      Sin --wav se envía un tono y se comprueba solo el transporte (puede
-      retornar silencio). Ctrl+C detiene el gateway; ambos servicios se limitan
-      a loopback.
+      el modelo de voz sigue siendo automático. La prueba usa un tono; añade
+      --wav "C:\ruta\audio.wav" para validar una respuesta hablada. Ctrl+C
+      detiene el gateway. Se cierra al terminar la pista o tras 30 segundos sin
+      respuesta o actividad de voz.
     </p>
   </details>
 </article>

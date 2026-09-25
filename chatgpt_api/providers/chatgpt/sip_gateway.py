@@ -15,6 +15,7 @@ import os
 import random
 import re
 import struct
+import time
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -45,6 +46,16 @@ def encode_pcmu(pcm: bytes) -> bytes:
         segment = min(segment, 7)
         encoded.append((~(sign | (segment << 4) | ((magnitude >> (segment + 3)) & 0x0F))) & 0xFF)
     return bytes(encoded)
+
+
+def pcm_rms(pcm: bytes) -> float:
+    samples = struct.iter_unpack("<h", pcm[: len(pcm) & ~1])
+    total = 0
+    count = 0
+    for (sample,) in samples:
+        total += sample * sample
+        count += 1
+    return (total / count) ** 0.5 if count else 0.0
 
 
 def parse_rtp(data: bytes) -> tuple[int, int, bytes] | None:
@@ -102,7 +113,7 @@ def parse_sip(data: bytes) -> SipRequest | None:
 
 
 def sip_audio_endpoint(request: SipRequest, source_ip: str) -> tuple[str, int] | None:
-    """Accept only PCMU/8000 and the signalling peer's IP to avoid RTP reflection."""
+    """Accept PCMU from the signalling peer, including private Docker NAT hops."""
     address = re.search(r"(?m)^c=IN IP4 ([^\r\n]+)", request.body)
     media = re.search(r"(?m)^m=audio (\d+) RTP/AVP ([0-9 ]+)", request.body)
     if not address or not media or "0" not in media.group(2).split():
@@ -110,7 +121,13 @@ def sip_audio_endpoint(request: SipRequest, source_ip: str) -> tuple[str, int] |
     try:
         ip = ipaddress.ip_address(address.group(1).strip())
         port = int(media.group(1))
-        if str(ip) != source_ip or not 1 <= port <= 65535:
+        peer_ip = ipaddress.ip_address(source_ip)
+        same_private_hop = (
+            ip.is_private
+            and peer_ip.is_private
+            and not (ip.is_loopback and peer_ip.is_loopback)
+        )
+        if (str(ip) != source_ip and not same_private_hop) or not 1 <= port <= 65535:
             return None
     except ValueError:
         return None
@@ -139,6 +156,9 @@ class Call:
     timestamp: int = field(default_factory=lambda: random.getrandbits(32))
     ssrc: int = field(default_factory=lambda: random.getrandbits(32))
     last_input_sequence: int | None = None
+    last_rtp_at: float = field(default_factory=time.monotonic)
+    last_voice_at: float = field(default_factory=time.monotonic)
+    rtp_watchdog_task: asyncio.Task[Any] | None = None
 
 
 class RtpInputTrack:
@@ -245,7 +265,12 @@ class SipGateway:
         if not request:
             return
         if request.method == "OPTIONS":
-            self._reply(request, addr, 200, "OK", extra={"Allow": "INVITE, ACK, BYE, CANCEL, OPTIONS"})
+            self._reply(request, addr, 200, "OK", extra={"Allow": "INVITE, ACK, BYE, CANCEL, OPTIONS, REGISTER"})
+        elif request.method == "REGISTER":
+            headers = {"Expires": request.headers.get("expires", "3600")}
+            if request.headers.get("contact"):
+                headers["Contact"] = request.headers["contact"]
+            self._reply(request, addr, 200, "OK", extra=headers)
         elif request.method == "INVITE":
             if self.call:
                 if request.call_id == self.call.request.call_id and self.call.last_response:
@@ -293,6 +318,9 @@ class SipGateway:
             if delta == 0 or delta >= 0x8000:
                 return
         call.last_input_sequence = sequence
+        call.last_rtp_at = time.monotonic()
+        if pcm_rms(decode_pcmu(payload)) >= 300:
+            call.last_voice_at = call.last_rtp_at
         call.rtp_peer = addr  # symmetric RTP, restricted to the approved SIP peer IP
         call.input_track.push(payload)
 
@@ -309,7 +337,9 @@ class SipGateway:
             call.last_response = self._reply(call.request, call.sip_peer, 200, "OK", sdp=sdp, tag=call.tag)
             call.established = True
             call.established_event.set()
+            call.last_voice_at = time.monotonic()
             call.retransmit_task = asyncio.create_task(self._retransmit_answer(call))
+            call.rtp_watchdog_task = asyncio.create_task(self._watch_rtp(call))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -417,7 +447,18 @@ class SipGateway:
         if self.call is call:
             await self._end_call()
 
+    async def _watch_rtp(self, call: Call) -> None:
+        while self.call is call and call.established:
+            await asyncio.sleep(1)
+            now = time.monotonic()
+            if now - call.last_rtp_at >= 30 or now - call.last_voice_at >= 30:
+                print("SIP call ended after 30 seconds without client or voice activity", flush=True)
+                self._send_bye(call)
+                await self._end_call()
+                return
+
     async def _send_audio(self, call: Call, track: Any) -> None:
+        from aiortc.mediastreams import MediaStreamError
         from av.audio.resampler import AudioResampler
 
         resampler = AudioResampler(format="s16", layout="mono", rate=8000)
@@ -431,12 +472,19 @@ class SipGateway:
                 while len(pending) >= 320:
                     chunk = bytes(pending[:320])
                     del pending[:320]
+                    if pcm_rms(chunk) >= 300:
+                        call.last_voice_at = time.monotonic()
                     packet = make_rtp(call.sequence, call.timestamp, call.ssrc, encode_pcmu(chunk))
                     self.rtp_transport.sendto(packet, call.rtp_peer)
                     call.sequence = (call.sequence + 1) & 0xFFFF
                     call.timestamp = (call.timestamp + 160) & 0xFFFFFFFF
-        except (asyncio.CancelledError, EOFError):
+        except asyncio.CancelledError:
             pass
+        except (EOFError, MediaStreamError):
+            if self.call is call and call.established:
+                print("ChatGPT ended the remote audio track", flush=True)
+                self._send_bye(call)
+                await self._end_call()
 
     async def _end_call(self) -> None:
         call = self.call
@@ -446,11 +494,14 @@ class SipGateway:
         if call.task and call.task is not asyncio.current_task():
             call.task.cancel()
         if call.output_task:
-            call.output_task.cancel()
+            if call.output_task is not asyncio.current_task():
+                call.output_task.cancel()
         if call.retransmit_task and call.retransmit_task is not asyncio.current_task():
             call.retransmit_task.cancel()
         if call.reconnect_task and call.reconnect_task is not asyncio.current_task():
             call.reconnect_task.cancel()
+        if call.rtp_watchdog_task and call.rtp_watchdog_task is not asyncio.current_task():
+            call.rtp_watchdog_task.cancel()
         if call.peer:
             await call.peer.close()
         if call.bridge_session_id:
@@ -479,9 +530,11 @@ class SipGateway:
             f"To: {to_value}",
             f"Call-ID: {request.call_id}",
             f"CSeq: {request.headers['cseq']}",
-            f"Contact: <sip:voice@{self.advertise_ip}:{self.sip_port}>",
         ]
-        for name, value in (extra or {}).items():
+        response_headers = extra or {}
+        if not any(name.lower() == "contact" for name in response_headers):
+            lines.append(f"Contact: <sip:voice@{self.advertise_ip}:{self.sip_port}>")
+        for name, value in response_headers.items():
             lines.append(f"{name}: {value}")
         if sdp:
             lines.append("Content-Type: application/sdp")
@@ -493,17 +546,17 @@ class SipGateway:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="One-call SIP/RTP PCMU gateway for ChatGPT Web Voice")
-    parser.add_argument("--bridge-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--listen-ip", default="127.0.0.1")
-    parser.add_argument("--advertise-ip")
-    parser.add_argument("--sip-port", type=int, default=5060)
-    parser.add_argument("--rtp-port", type=int, default=40000)
+    parser.add_argument("--bridge-url", default=os.environ.get("CHATGPT_SIP_BRIDGE_URL", "http://127.0.0.1:8000"))
+    parser.add_argument("--listen-ip", default=os.environ.get("CHATGPT_SIP_LISTEN_IP", "127.0.0.1"))
+    parser.add_argument("--advertise-ip", default=os.environ.get("CHATGPT_SIP_ADVERTISE_IP"))
+    parser.add_argument("--sip-port", type=int, default=int(os.environ.get("CHATGPT_SIP_PORT", "5060")))
+    parser.add_argument("--rtp-port", type=int, default=int(os.environ.get("CHATGPT_SIP_RTP_PORT", "40000")))
     parser.add_argument("--allow-ip", action="append", dest="allowed_ips")
-    parser.add_argument("--voice", default="cove")
-    parser.add_argument("--model", default="auto")
-    parser.add_argument("--project")
-    parser.add_argument("--conversation-id")
-    parser.add_argument("--text")
+    parser.add_argument("--voice", default=os.environ.get("CHATGPT_SIP_VOICE", "cove"))
+    parser.add_argument("--model", default=os.environ.get("CHATGPT_SIP_MODEL", "auto"))
+    parser.add_argument("--project", default=os.environ.get("CHATGPT_SIP_PROJECT"))
+    parser.add_argument("--conversation-id", default=os.environ.get("CHATGPT_SIP_CONVERSATION_ID"))
+    parser.add_argument("--text", default=os.environ.get("CHATGPT_SIP_TEXT"))
     parser.add_argument("--attachment", action="append", default=[], type=Path)
     args = parser.parse_args()
     key = os.environ.get("CHATGPT_API_KEY")
@@ -512,7 +565,7 @@ def main() -> None:
     bridge = urlparse(args.bridge_url)
     if bridge.scheme not in {"http", "https"} or not bridge.hostname:
         parser.error("--bridge-url must be an HTTP(S) URL")
-    if bridge.scheme == "http" and bridge.hostname not in {"127.0.0.1", "localhost", "::1"}:
+    if bridge.scheme == "http" and bridge.hostname not in {"127.0.0.1", "localhost", "::1", "chatgpt-api"}:
         parser.error("remote --bridge-url requires HTTPS to protect the bridge key")
     if args.listen_ip == "0.0.0.0" and not args.advertise_ip:
         parser.error("--advertise-ip is required when listening on all interfaces")
@@ -534,7 +587,9 @@ def main() -> None:
         bridge_url=args.bridge_url, api_key=key, listen_ip=args.listen_ip,
         advertise_ip=args.advertise_ip or args.listen_ip,
         sip_port=args.sip_port, rtp_port=args.rtp_port,
-        allowed_ips=tuple(args.allowed_ips or ["127.0.0.1/32"]),
+        allowed_ips=tuple(args.allowed_ips or [
+            value.strip() for value in os.environ.get("CHATGPT_SIP_ALLOWED_IPS", "127.0.0.1/32").split(",") if value.strip()
+        ]),
         voice=args.voice, model=args.model, project=args.project,
         conversation_id=args.conversation_id, text=args.text, files=files,
     )
