@@ -14,7 +14,7 @@ ANSWER = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
 
 @pytest.mark.parametrize(
     "selected_voice",
-    ["arbor", "breeze", "ember", "sol", "cove", "spruce", "vale", "maple", "juniper"],
+    ["fathom", "breeze", "ember", "glimmer", "cove", "orbit", "vale", "maple", "juniper"],
 )
 def test_chatgpt_voice_choices_are_accepted(monkeypatch, selected_voice):
     sent = []
@@ -31,6 +31,27 @@ def test_chatgpt_voice_choices_are_accepted(monkeypatch, selected_voice):
     )
 
     assert sent == [selected_voice]
+    assert voice.release_session(result.bridge_session_id)
+
+
+@pytest.mark.parametrize(
+    ("display_id", "upstream_id"),
+    [("arbor", "fathom"), ("sol", "glimmer"), ("spruce", "orbit")],
+)
+def test_legacy_voice_ids_are_normalized(monkeypatch, display_id, upstream_id):
+    sent = []
+    monkeypatch.setattr(
+        voice,
+        "_post_offer",
+        lambda _auth, _impersonate, _offer, chosen, **_options: sent.append(chosen) or ANSWER,
+    )
+    result = voice.negotiate_voice(
+        offer_sdp=OFFER,
+        voice=display_id,
+        account_order=("primary",),
+        load_auth=lambda _account: (ChatGPTAuthConfig(access_token="test-token"), "chrome"),
+    )
+    assert sent == [upstream_id]
     assert voice.release_session(result.bridge_session_id)
 
 
@@ -56,6 +77,20 @@ def test_voice_signalling_keeps_account_binding_on_reconnect(monkeypatch):
     assert second.bridge_session_id == first.bridge_session_id
     assert [item[0] for item in seen] == ["primary", "primary"]
     assert seen[0][3]["upstream_session_id"] == seen[1][3]["upstream_session_id"]
+    assert voice.release_session(first.bridge_session_id)
+
+
+def test_voice_signalling_reconnect_cannot_change_voice(monkeypatch):
+    monkeypatch.setattr(voice, "_post_offer", lambda *_args, **_kwargs: ANSWER)
+    load = lambda account: (ChatGPTAuthConfig(access_token=account), "chrome")
+    first = voice.negotiate_voice(
+        offer_sdp=OFFER, voice="fathom", account_order=("primary",), load_auth=load,
+    )
+    with pytest.raises(voice.VoiceSignallingError, match="voice cannot change"):
+        voice.negotiate_voice(
+            offer_sdp=OFFER, voice="glimmer", account_order=("primary",), load_auth=load,
+            bridge_session_id=first.bridge_session_id,
+        )
     assert voice.release_session(first.bridge_session_id)
 
 
@@ -132,6 +167,21 @@ def test_voice_offer_preserves_thread_model_and_project(monkeypatch):
     assert '"voice_session_id":"VOICE-1"' in body
 
 
+def test_voice_offer_sends_arbor_internal_id(monkeypatch):
+    from curl_cffi import requests
+
+    captured = {}
+
+    class Response:
+        status_code = 200
+        text = ANSWER
+
+    monkeypatch.setattr(requests, "post", lambda _url, **kwargs: captured.update(kwargs) or Response())
+    voice._post_offer(ChatGPTAuthConfig(access_token="test-token"), "chrome", OFFER, "fathom")
+
+    assert '"voice":"fathom"' in captured["data"].decode("utf-8")
+
+
 def test_voice_reconnect_cannot_switch_conversation_or_account(monkeypatch):
     monkeypatch.setattr(voice, "_post_offer", lambda *_args, **_kwargs: ANSWER)
     load = lambda account: (ChatGPTAuthConfig(access_token=account), "chrome")
@@ -183,7 +233,7 @@ def test_voice_api_prepares_initial_text_and_files_in_same_project_thread(monkey
     assert captured["voice"]["parent_message_id"] == parent_id
     assert captured["voice"]["project_id"] == "g-p-1234567890123456"
     assert captured["voice"]["account_order"] == ("primary",)
-    assert captured["voice"]["voice"] == "arbor"
+    assert captured["voice"]["voice"] == "fathom"
     assert response["initial_response"] == "Listo"
     assert response["voice_model"] == "auto"
 

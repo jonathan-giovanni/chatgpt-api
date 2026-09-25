@@ -18,7 +18,8 @@ from chatgpt_api.providers.chatgpt.timezone import local_timezone_payload
 VOICE_URL = "https://chatgpt.com/realtime/wm?dcid=0"
 MAX_OFFER_BYTES = 65_536
 SESSION_TTL_SECONDS = 3_600
-VOICES = frozenset({"arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"})
+VOICES = frozenset({"fathom", "breeze", "cove", "ember", "glimmer", "juniper", "maple", "orbit", "vale"})
+VOICE_ALIASES = {"arbor": "fathom", "sol": "glimmer", "spruce": "orbit"}
 _SESSIONS: dict[str, VoiceBinding] = {}
 _SESSION_LOCK = threading.Lock()
 
@@ -42,6 +43,7 @@ class VoiceBinding:
     account: str
     deadline: float
     upstream_session_id: str
+    voice: str
     conversation_id: str | None
     parent_message_id: str | None
     project_id: str | None
@@ -103,6 +105,16 @@ def _validated_model(value: Any) -> str:
     return value
 
 
+def _validated_voice(value: Any) -> str:
+    if not isinstance(value, str):
+        raise VoiceSignallingError("unsupported voice", 400)
+    normalized = value.strip().lower()
+    canonical = VOICE_ALIASES.get(normalized, normalized)
+    if canonical not in VOICES:
+        raise VoiceSignallingError("unsupported voice", 400)
+    return canonical
+
+
 def negotiate_voice(
     *,
     offer_sdp: Any,
@@ -117,8 +129,7 @@ def negotiate_voice(
 ) -> VoiceAnswer:
     """Exchange one browser offer for one upstream answer, with bounded account failover."""
     offer = _validated_offer(offer_sdp)
-    if not isinstance(voice, str) or voice not in VOICES:
-        raise VoiceSignallingError("unsupported voice", 400)
+    voice = _validated_voice(voice)
     session_id = _validated_session_id(bridge_session_id)
     conversation_id = _optional_uuid(conversation_id, "conversation_id")
     parent_message_id = _optional_uuid(parent_message_id, "parent_message_id")
@@ -142,10 +153,13 @@ def negotiate_voice(
                 raise VoiceSignallingError(f"{name} cannot change during a voice session", 400)
         if model != "auto" and model != binding.model:
             raise VoiceSignallingError("model cannot change during a voice session", 400)
+        if voice != binding.voice:
+            raise VoiceSignallingError("voice cannot change during a voice session", 400)
         conversation_id = binding.conversation_id
         parent_message_id = binding.parent_message_id
         project_id = binding.project_id
         model = binding.model
+        voice = binding.voice
     accounts = (binding.account,) if binding else tuple(dict.fromkeys(account_order))
     if not accounts:
         raise VoiceSignallingError("no ChatGPT account configured", 503)
@@ -171,7 +185,7 @@ def negotiate_voice(
         with _SESSION_LOCK:
             _SESSIONS[session_id] = VoiceBinding(
                 account, time.monotonic() + SESSION_TTL_SECONDS,
-                upstream_session_id, conversation_id, parent_message_id, project_id, model,
+                upstream_session_id, voice, conversation_id, parent_message_id, project_id, model,
             )
         return VoiceAnswer(answer_sdp=answer, bridge_session_id=session_id, account=account,
                            conversation_id=conversation_id)

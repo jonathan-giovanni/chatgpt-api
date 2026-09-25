@@ -42,18 +42,18 @@
   const OUTPUT_SILENCE_MS = 1_200;
   const TEXT_EXTENSIONS = /\.(txt|md|csv|json)$/i;
   const voices = [
-    { value: "arbor", label: "Arbor (predeterminada)" },
+    { value: "fathom", label: "Arbor (predeterminada)" },
     { value: "breeze", label: "Breeze" },
     { value: "ember", label: "Ember" },
-    { value: "sol", label: "Sol" },
+    { value: "glimmer", label: "Sol" },
     { value: "cove", label: "Cove" },
-    { value: "spruce", label: "Spruce" },
+    { value: "orbit", label: "Spruce" },
     { value: "vale", label: "Vale" },
     { value: "maple", label: "Maple" },
     { value: "juniper", label: "Juniper" },
   ];
 
-  let voice = $state("arbor");
+  let voice = $state("fathom");
   let sourceMode = $state<"file" | "mic">("file");
   let audioFile = $state<File | null>(null);
   let status = $state("Desconectado.");

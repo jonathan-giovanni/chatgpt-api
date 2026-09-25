@@ -41,7 +41,7 @@ Content-Type: application/json
 
 {
   "offer_sdp": "v=0\r\n...",
-  "voice": "arbor",
+  "voice": "fathom",
   "model": "auto",
   "project": "My Project",
   "text": "Start by summarizing these notes.",
@@ -49,9 +49,11 @@ Content-Type: application/json
 }
 ```
 
-`voice` is optional and defaults to `arbor`. Supported values are `arbor`,
-`breeze`, `ember`, `sol`, `cove`, `spruce`, `vale`, `maple`, and `juniper`; the
-UI lets the caller choose any of them. `project`, `text`, `files`, `model`, and
+`voice` is optional and defaults to `fathom` (the ChatGPT voice named Arbor).
+The UI displays ChatGPT's names and sends their internal IDs: Arbor=`fathom`,
+Breeze=`breeze`, Ember=`ember`, Sol=`glimmer`, Cove=`cove`, Spruce=`orbit`,
+Vale=`vale`, Maple=`maple`, and Juniper=`juniper`. The former `arbor`, `sol`,
+and `spruce` IDs remain accepted as aliases. `project`, `text`, `files`, `model`, and
 `conversation_id` are optional. A new conversation is created when
 `conversation_id` is omitted. `files` requires
 `text`; attachment limits match Chat Completions (10 files, 20 MiB each,
@@ -105,9 +107,9 @@ publishes the standard local ports automatically:
 docker compose run --rm --build --service-ports sip-gateway
 ```
 
-The Bridge Console command includes the selected project, voice, model, UUID
-and text. Arbor is the default voice, and the selected voice is passed to both
-WebRTC and SIP/RTP.
+The Bridge Console command includes the selected project, voice ID, model, UUID
+and text. Arbor (`fathom`) is the default voice, and the selected internal voice
+ID is passed to both WebRTC and SIP/RTP.
 The gateway opens UDP 5060 for SIP and UDP 40000 for RTP, bound to loopback.
 MicroSIP can connect directly with server/domain `127.0.0.1`, user `voice`,
 UDP 5060, and no password. Registration is accepted locally without

@@ -945,7 +945,7 @@ async def _start_voice_session(
 
     answer = negotiate_voice(
         offer_sdp=body.get("offer_sdp"),
-        voice=body.get("voice", "arbor"),
+        voice=body.get("voice", "fathom"),
         bridge_session_id=bridge_id,
         conversation_id=conversation_id,
         parent_message_id=parent_message_id,
