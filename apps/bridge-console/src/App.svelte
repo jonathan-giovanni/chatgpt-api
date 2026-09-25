@@ -11,6 +11,7 @@
   import PanelTitle from "./lib/PanelTitle.svelte";
   import ResponseFieldGuide from "./lib/ResponseFieldGuide.svelte";
   import Textarea from "./lib/Textarea.svelte";
+  import VoiceTestPanel from "./lib/VoiceTestPanel.svelte";
 
   const DEFAULT_API_KEY = "local-dev-key";
   const DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1";
@@ -667,7 +668,7 @@
     ["overview", "Overview", "Run status, setup flow, live accounts"],
     ["accounts", "Accounts", "Paste captures, repair broken accounts"],
     ["projects", "Projects", "Map names and route new conversations"],
-    ["test-lab", "Test Lab", "Chat, context, image, and research calls"],
+    ["test-lab", "Test Lab", "Chat, WebRTC voice, SIP/RTP, and API tests"],
     ["limits", "Limits", "Per-plan and per-account runtime throttles"],
     ["api-docs", "Docs", "API, CLI, Docker, and route examples"],
     ["storage", "Library", "Preview generated images and reports"],
@@ -838,6 +839,12 @@
   );
   const visibleModelIds = $derived(
     modelIds.length ? modelIds : fallbackModelIds(),
+  );
+  const voiceTextFiles = $derived(
+    chatFiles.filter((file) => /\.(txt|md|csv|json)$/i.test(file.name)),
+  );
+  const selectedChatProjectName = $derived(
+    projects.find((project) => project.alias === selectedChatProject)?.name ?? "",
   );
   const modelGroups = $derived(buildModelGroups());
   const capacityCards = $derived(buildCapacityCards());
@@ -3942,6 +3949,18 @@
             <pre
               class="mt-4 min-h-40 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-white/10 bg-slate-950 p-4 text-sm text-slate-300">{chatResult}</pre>
           </article>
+
+          <VoiceTestPanel
+            {apiKey}
+            {baseUrl}
+            projectAlias={selectedChatProject}
+            projectName={selectedChatProjectName}
+            model={chatModel}
+            conversationId={chatConversationId}
+            initialText={chatPrompt}
+            initialFiles={voiceTextFiles}
+            onConversationChange={(id) => chatConversationId = id}
+          />
 
           <article
             class="rounded-[2rem] border border-white/10 bg-slate-900/80 p-5"

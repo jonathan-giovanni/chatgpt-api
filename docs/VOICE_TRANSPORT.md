@@ -1,28 +1,23 @@
 # ChatGPT Web Voice: WebRTC and SIP/RTP
 
 This is an experimental adapter to ChatGPT Web's private Voice signalling, not
-the public OpenAI Realtime API. The browser page at `http://127.0.0.1:8000/voice`
-supports an audio file or microphone, optional initial text, its chat model,
-Project selection by name, an existing conversation UUID, and text attachments.
-The ChatGPT credential stays on the bridge. Media flows through WebRTC directly
-between the peer and ChatGPT; the bridge handles only SDP and optional chat
-preparation.
+the public OpenAI Realtime API. The primary UI is the WebRTC panel inside the
+Bridge Console Test Lab at `http://127.0.0.1:8080/#test-lab`. It shares the chat
+test's selected Project, model, conversation UUID, initial text, and text
+attachments. It accepts a local audio file or microphone. The ChatGPT credential
+stays on the bridge. Media flows through WebRTC directly between the peer and
+ChatGPT; the bridge handles only SDP and optional chat preparation.
 
 ## Browser test
 
-1. Start the bridge: `docker compose up -d --build chatgpt-api`.
-2. Open `/voice`, enter the local `CHATGPT_API_KEY`, and load Projects/models.
-3. Optionally choose a Project and model, enter an existing conversation UUID,
-   type an initial message, and attach UTF-8 `.txt`, `.md`, `.csv`, or `.json` files.
-4. Choose a local audio file or microphone and connect. The initial message is
-   completed before the WebRTC offer is exchanged; its answer and UUID appear
-   on the page. An omitted Project creates a conversation outside Projects.
-5. While connected, send additional text and text attachments through the
-   page. When a UUID is known, these use Chat Completions with that UUID, so
-   the response stays in the same chat. End the call to release the binding.
+1. Start both local services: `docker compose up -d --build chatgpt-api bridge-console`.
+2. Open `http://127.0.0.1:8080/#test-lab` in the Bridge Console. Use **Refresh** if its status is still loading.
+3. In **Single message test**, select a Project (optional), model, existing conversation UUID if continuing, initial message, and text attachments.
+4. In **Voz en esta conversación** below it, choose a local audio file or microphone and start voice. The panel uses the same Project, model, UUID, message, and text files. An empty Project creates the conversation outside Projects.
+5. When the UUID is known, use the voice panel's follow-up composer for text or text-file turns in the same thread. The outer chat panel also receives that UUID for later chat tests. Finalizar releases the voice binding.
 
 The local audio file is decoded into a browser media track. It is not uploaded
-as a chat attachment. The page caps it at 20 MiB and five minutes. Microphone
+as a chat attachment. The panel caps it at 20 MiB and five minutes. Microphone
 capture is opt-in. The ChatGPT account determines the effective live voice
 model; `model` selects the model for the optional initial text turn. Passing a
 regular chat model slug to the private live voice handshake was observed to
