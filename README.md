@@ -5,8 +5,8 @@
 **A local API bridge for building real apps on top of ChatGPT Web accounts.**
 
 Run chat, streaming, image generation, image editing, OCR/vision, Deep Research,
-artifact downloads, opencode integration, and a full-stack character game from
-one local stack.
+WebRTC voice, local SIP/RTP, artifact downloads, opencode integration, and a
+full-stack character game from one local stack.
 
 <p>
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-16a34a?style=for-the-badge">
@@ -21,6 +21,7 @@ one local stack.
   · <a href="#what-this-is">What It Does</a>
   · <a href="#account-capture">Account Capture</a>
   · <a href="#api-overview">API Routes</a>
+  · <a href="#voice-project-and-file-apis">Voice and SIP</a>
   · <a href="#image-generation">Images</a>
   · <a href="#deep-research">Research</a>
   · <a href="#opencode-integration">opencode</a>
@@ -102,6 +103,10 @@ downloads, and developer tooling.
 | Deep Research report export | `chatgpt-deep-research` model alias | implemented |
 | File downloads | `GET/HEAD /v1/chatgpt/files/{id}/{filename}` | implemented |
 | Account usage and limits | `GET /v1/chatgpt/usage` | implemented when ChatGPT reports data |
+| Project-aware conversation continuity | `chatgpt_project` and `conversation_id` in chat requests | implemented |
+| WebRTC voice with selectable ChatGPT voice | `POST /v1/chatgpt/voice/sessions` and Bridge Console Test Lab | experimental; Arbor maps to `fathom` |
+| SIP/RTP local telephony | Docker `sip-gateway`, SIP/UDP and RTP/PCMU | experimental; one loopback call at a time |
+| Text/audio file input | chat content parts; UTF-8 text, WAV, and MP3 | implemented with bounded sizes |
 | opencode consumer config | `integrations/opencode/*` | implemented |
 | Character game use case | `apps/character-game` | included as a working reference app |
 
@@ -121,15 +126,20 @@ Recent project updates include:
 - **Model discovery and Project routing:** modernizes model metadata and lets new chats target an optional ChatGPT Project.
 - **Text and audio attachments:** accepts bounded text-file and WAV/MP3 attachments in ordinary chats, including existing conversations. Audio files sent this way are generic attachments and do not guarantee transcription.
 - **Conversation continuity:** returns a conversation UUID and accepts it on later requests to continue the same ChatGPT conversation, preserving its account and Project routing.
-- **Experimental Web Voice and SIP/RTP:** the Bridge Console Test Lab now includes a WebRTC voice panel wired to the chat test's selected Project, model, conversation UUID, initial text, and text attachments. It accepts a local audio file or microphone, detects audio-track closure and ends idle calls after 30 seconds without voice activity, without adding messages to the chat. The optional SIP/PCMU gateway runs in Docker with Compose credentials and standard local ports. Voice-model selection remains automatic. See [voice transport](docs/VOICE_TRANSPORT.md) for setup and limits.
+- **Experimental Web Voice and SIP/RTP:** the Bridge Console Test Lab includes a WebRTC voice panel wired to the selected Project, model, conversation UUID, initial text, and text attachments. It accepts a local audio file or microphone, detects audio-track closure, and ends idle calls after 30 seconds without voice activity, without adding health-check messages. The optional SIP/PCMU gateway runs in Docker with the bridge's configured credentials and local ports.
+- **ChatGPT voice IDs:** the UI keeps familiar voice names and sends their internal IDs. Arbor now sends `fathom` by default; Sol sends `glimmer` and Spruce sends `orbit`. The selected voice is passed through WebRTC and SIP/RTP, while ChatGPT still chooses the voice model. See [voice transport](docs/VOICE_TRANSPORT.md) for setup and limits.
 
 ## Latest Validation Snapshot
 
-These checks were run locally on 2026-09-25 for Web Voice and SIP/RTP:
+These checks were run locally on 2026-09-25 for Web Voice, SIP/RTP, and the
+internal voice ID correction:
 
 | Check | Result |
 | --- | --- |
-| Python full suite in Linux Docker | `254 passed` |
+| Focused Python voice, SIP, and OpenAI-compatible API tests | `130 passed` |
+| Bridge Console Svelte diagnostics | `0 errors, 0 warnings` |
+| Docker API and Bridge Console production builds | both images built; API healthy and Test Lab online |
+| Voice ID mapping | Arbor is displayed while WebRTC and generated SIP command send `fathom`; legacy IDs are normalized |
 | SIP gateway image and Compose wiring | image builds with the SIP extra; local UDP 5060/40000 start without manual key or bridge URL |
 | Bridge Console Test Lab integration | shared Project selection appeared in the WebRTC panel and request preview |
 | Browser WebRTC call with a local WAV and initial text | remote audio track played; conversation UUID returned |
@@ -659,6 +669,26 @@ required pieces are missing.
 | `/v1/chatgpt/admin/*` | Local operator routes used by the console and CLI. |
 
 Full route details: [docs/OPENAI_COMPATIBILITY.md](docs/OPENAI_COMPATIBILITY.md)
+
+### Voice, Project, And File APIs
+
+| API / surface | Format | Status | Example |
+| --- | --- | --- | --- |
+| `POST /v1/chatgpt/voice/sessions` | JSON with `offer_sdp`, `voice`, and optional `project`, `conversation_id`, `model`, `text`, and `files` (files require text). | Experimental: uses ChatGPT Web's private voice signalling. | `{"offer_sdp":"v=0\r\nm=audio ...","voice":"fathom"}` |
+| `POST /v1/chatgpt/voice/sessions/release` | JSON with `bridge_session_id`. | Implemented; releases the local voice binding. | `{"bridge_session_id":"vs_<id>"}` |
+| `POST /v1/chat/completions` (conversation continuation) | JSON or SSE (`"stream": true`); supports `chatgpt_project` and `conversation_id`. | Implemented; UUID continues the same conversation and Project. | `{"model":"auto","chatgpt_project":"INCIDENCIAS","conversation_id":"<UUID>","messages":[...]}` |
+| File content in chat | JSON content parts; text files are UTF-8 and audio attachments accept WAV/MP3. | Implemented with request size limits; audio attachments do not guarantee transcription. | `{"filename":"notes.txt","file_data":"<base64>"}` |
+| Bridge Console WebRTC voice | WebRTC audio track from microphone or a local audio file; optional initial text and text files share the chat context. | Experimental; available in Test Lab. | Open `http://127.0.0.1:8080/#test-lab`, choose a Project if wanted, then start voice. |
+| Docker SIP/RTP gateway | SIP/UDP plus RTP/PCMU (G.711 µ-law, 8 kHz). | Experimental; one local call at a time, loopback by default. | MicroSIP: server `127.0.0.1`, UDP `5060`, user `voice`, no password. |
+
+ChatGPT's visible voice names use internal IDs in the request: Arbor=`fathom`
+(the default), Breeze=`breeze`, Ember=`ember`, Sol=`glimmer`, Cove=`cove`,
+Spruce=`orbit`, Vale=`vale`, Maple=`maple`, and Juniper=`juniper`. The older
+IDs `arbor`, `sol`, and `spruce` remain accepted as aliases. Selecting a voice
+does not select the voice model; ChatGPT chooses that model automatically. The
+private signalling response does not confirm which voice produced the audio, so
+this integration remains experimental. See [voice transport](docs/VOICE_TRANSPORT.md)
+for full request and setup details.
 
 ## Chat Example
 
@@ -1656,6 +1686,7 @@ opencode does not use the bridge
 - [CLI guide](docs/CLI.md)
 - [Docker guide](docs/DOCKER.md)
 - [OpenAI-shaped API guide](docs/OPENAI_COMPATIBILITY.md)
+- [WebRTC voice API and local SIP/RTP guide](docs/VOICE_TRANSPORT.md)
 - [Architecture notes](docs/ARCHITECTURE.md)
 - [Project analysis](docs/PROJECT_ANALYSIS.md)
 - [opencode integration](integrations/opencode/README.md)
