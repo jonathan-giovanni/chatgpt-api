@@ -552,7 +552,7 @@ def main() -> None:
     parser.add_argument("--sip-port", type=int, default=int(os.environ.get("CHATGPT_SIP_PORT", "5060")))
     parser.add_argument("--rtp-port", type=int, default=int(os.environ.get("CHATGPT_SIP_RTP_PORT", "40000")))
     parser.add_argument("--allow-ip", action="append", dest="allowed_ips")
-    parser.add_argument("--voice", default=os.environ.get("CHATGPT_SIP_VOICE", "cove"))
+    parser.add_argument("--voice", default=os.environ.get("CHATGPT_SIP_VOICE", "arbor"))
     parser.add_argument("--model", default=os.environ.get("CHATGPT_SIP_MODEL", "auto"))
     parser.add_argument("--project", default=os.environ.get("CHATGPT_SIP_PROJECT"))
     parser.add_argument("--conversation-id", default=os.environ.get("CHATGPT_SIP_CONVERSATION_ID"))

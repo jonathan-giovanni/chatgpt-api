@@ -18,7 +18,7 @@ from chatgpt_api.providers.chatgpt.timezone import local_timezone_payload
 VOICE_URL = "https://chatgpt.com/realtime/wm?dcid=0"
 MAX_OFFER_BYTES = 65_536
 SESSION_TTL_SECONDS = 3_600
-VOICES = frozenset({"breeze", "cove", "ember", "fathom", "glimmer", "juniper", "maple", "orbit", "vale"})
+VOICES = frozenset({"arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"})
 _SESSIONS: dict[str, VoiceBinding] = {}
 _SESSION_LOCK = threading.Lock()
 

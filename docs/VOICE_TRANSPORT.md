@@ -41,7 +41,7 @@ Content-Type: application/json
 
 {
   "offer_sdp": "v=0\r\n...",
-  "voice": "cove",
+  "voice": "arbor",
   "model": "auto",
   "project": "My Project",
   "text": "Start by summarizing these notes.",
@@ -49,8 +49,11 @@ Content-Type: application/json
 }
 ```
 
-`project`, `text`, `files`, `model`, and `conversation_id` are optional. A new
-conversation is created when `conversation_id` is omitted. `files` requires
+`voice` is optional and defaults to `arbor`. Supported values are `arbor`,
+`breeze`, `ember`, `sol`, `cove`, `spruce`, `vale`, `maple`, and `juniper`; the
+UI lets the caller choose any of them. `project`, `text`, `files`, `model`, and
+`conversation_id` are optional. A new conversation is created when
+`conversation_id` is omitted. `files` requires
 `text`; attachment limits match Chat Completions (10 files, 20 MiB each,
 25 MiB total). For an existing UUID, the initial text/attachments extend that
 conversation before voice starts. Project names and aliases resolve using the
@@ -102,7 +105,9 @@ publishes the standard local ports automatically:
 docker compose run --rm --build --service-ports sip-gateway
 ```
 
-The Bridge Console command includes the selected project, model, UUID and text.
+The Bridge Console command includes the selected project, voice, model, UUID
+and text. Arbor is the default voice, and the selected voice is passed to both
+WebRTC and SIP/RTP.
 The gateway opens UDP 5060 for SIP and UDP 40000 for RTP, bound to loopback.
 MicroSIP can connect directly with server/domain `127.0.0.1`, user `voice`,
 UDP 5060, and no password. Registration is accepted locally without

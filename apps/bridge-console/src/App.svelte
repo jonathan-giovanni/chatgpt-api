@@ -3953,8 +3953,9 @@
           <VoiceTestPanel
             {apiKey}
             {baseUrl}
-            projectAlias={selectedChatProject}
+            bind:projectAlias={selectedChatProject}
             projectName={selectedChatProjectName}
+            {projects}
             model={chatModel}
             conversationId={chatConversationId}
             initialText={chatPrompt}

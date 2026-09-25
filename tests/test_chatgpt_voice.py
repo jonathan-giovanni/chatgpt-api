@@ -12,6 +12,28 @@ OFFER = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
 ANSWER = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
 
 
+@pytest.mark.parametrize(
+    "selected_voice",
+    ["arbor", "breeze", "ember", "sol", "cove", "spruce", "vale", "maple", "juniper"],
+)
+def test_chatgpt_voice_choices_are_accepted(monkeypatch, selected_voice):
+    sent = []
+    monkeypatch.setattr(
+        voice,
+        "_post_offer",
+        lambda _auth, _impersonate, _offer, chosen, **_options: sent.append(chosen) or ANSWER,
+    )
+    result = voice.negotiate_voice(
+        offer_sdp=OFFER,
+        voice=selected_voice,
+        account_order=("primary",),
+        load_auth=lambda _account: (ChatGPTAuthConfig(access_token="test-token"), "chrome"),
+    )
+
+    assert sent == [selected_voice]
+    assert voice.release_session(result.bridge_session_id)
+
+
 def test_voice_signalling_keeps_account_binding_on_reconnect(monkeypatch):
     seen = []
 
@@ -161,6 +183,7 @@ def test_voice_api_prepares_initial_text_and_files_in_same_project_thread(monkey
     assert captured["voice"]["parent_message_id"] == parent_id
     assert captured["voice"]["project_id"] == "g-p-1234567890123456"
     assert captured["voice"]["account_order"] == ("primary",)
+    assert captured["voice"]["voice"] == "arbor"
     assert response["initial_response"] == "Listo"
     assert response["voice_model"] == "auto"
 

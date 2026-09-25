@@ -2,6 +2,7 @@
   import { onDestroy } from "svelte";
 
   type TextAttachment = { filename: string; file_data: string };
+  type ProjectOption = { alias: string; name: string; account: string };
   type VoiceResponse = {
     error?: { message?: string };
     answer_sdp?: string;
@@ -14,8 +15,9 @@
   let {
     apiKey,
     baseUrl,
-    projectAlias,
+    projectAlias = $bindable(""),
     projectName,
+    projects,
     model,
     conversationId,
     initialText,
@@ -26,6 +28,7 @@
     baseUrl: string;
     projectAlias: string;
     projectName: string;
+    projects: ProjectOption[];
     model: string;
     conversationId: string;
     initialText: string;
@@ -39,18 +42,18 @@
   const OUTPUT_SILENCE_MS = 1_200;
   const TEXT_EXTENSIONS = /\.(txt|md|csv|json)$/i;
   const voices = [
-    "cove",
-    "breeze",
-    "ember",
-    "fathom",
-    "glimmer",
-    "juniper",
-    "maple",
-    "orbit",
-    "vale",
+    { value: "arbor", label: "Arbor (predeterminada)" },
+    { value: "breeze", label: "Breeze" },
+    { value: "ember", label: "Ember" },
+    { value: "sol", label: "Sol" },
+    { value: "cove", label: "Cove" },
+    { value: "spruce", label: "Spruce" },
+    { value: "vale", label: "Vale" },
+    { value: "maple", label: "Maple" },
+    { value: "juniper", label: "Juniper" },
   ];
 
-  let voice = $state("cove");
+  let voice = $state("arbor");
   let sourceMode = $state<"file" | "mic">("file");
   let audioFile = $state<File | null>(null);
   let status = $state("Desconectado.");
@@ -96,6 +99,7 @@
   const sipGatewayCommand = $derived(
     [
       "docker compose run --rm --build --service-ports",
+      `-e CHATGPT_SIP_VOICE=${powerShellQuote(voice)}`,
       projectAlias
         ? `-e CHATGPT_SIP_PROJECT=${powerShellQuote(projectAlias)}`
         : "",
@@ -692,6 +696,21 @@
 
   <div class="mt-4 grid gap-4 md:grid-cols-2">
     <label class="block text-sm font-bold text-slate-300"
+      >Proyecto para WebRTC y SIP/RTP
+      <select
+        class="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-3"
+        bind:value={projectAlias}
+        disabled={active || busy || Boolean(conversationId.trim())}
+      >
+        <option value="">Fuera de proyectos</option>
+        {#each projects as project (project.alias)}
+          <option value={project.alias}
+            >{project.name} · {project.account}</option
+          >
+        {/each}
+      </select>
+    </label>
+    <label class="block text-sm font-bold text-slate-300"
       >Origen de audio
       <select
         class="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-3"
@@ -710,10 +729,16 @@
         bind:value={voice}
         disabled={active}
       >
-        {#each voices as option}<option value={option}>{option}</option>{/each}
+        {#each voices as option}
+          <option value={option.value}>{option.label}</option>
+        {/each}
       </select>
     </label>
   </div>
+  <p class="mt-2 text-xs text-slate-400">
+    Arbor está seleccionada por defecto. Puedes cambiarla cuando quieras; el
+    modelo de voz lo decide ChatGPT.
+  </p>
   {#if sourceMode === "file"}
     <label class="mt-4 block text-sm font-bold text-slate-300"
       >Audio local (WAV, MP3 u otro formato compatible; hasta 20 MiB y 5
@@ -827,10 +852,10 @@
       class="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-3 text-xs text-cyan-100">uv run --extra sip python scripts/sip_rtp_smoke.py</pre>
     <p class="mt-3 text-xs text-slate-400">
       El gateway hereda el proyecto, modelo, UUID y texto seleccionados arriba;
-      el modelo de voz sigue siendo automático. La prueba usa un tono; añade
-      --wav "C:\ruta\audio.wav" para validar una respuesta hablada. Ctrl+C
-      detiene el gateway. Se cierra al terminar la pista o tras 30 segundos sin
-      respuesta o actividad de voz.
+      la voz elegida arriba (Arbor por defecto) y el modelo de voz sigue siendo
+      automático. La prueba usa un tono; añade --wav "C:\ruta\audio.wav" para
+      validar una respuesta hablada. Ctrl+C detiene el gateway. Se cierra al
+      terminar la pista o tras 30 segundos sin respuesta o actividad de voz.
     </p>
   </details>
 </article>
