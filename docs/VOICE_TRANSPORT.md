@@ -118,6 +118,46 @@ gateway has no SIP Digest, TLS, SRTP, NAT traversal, transcoding, or multi-call
 support; use a PBX/SBC for those functions. The bridge bearer key is never sent
 in SIP or RTP.
 
+### Local SIP/RTP smoke test (Windows PowerShell)
+
+Run these commands from the repository root in three terminals (the browser is
+optional for this transport check). The local bridge must already have at least
+one valid ChatGPT account configured.
+
+1. Start or rebuild the API bridge:
+
+   ```powershell
+   docker compose up -d --build chatgpt-api
+   ```
+
+2. In terminal A, start the one-call SIP gateway. Use the same local bridge key
+   configured in Compose; the local default is shown here:
+
+   ```powershell
+   $env:CHATGPT_API_KEY = "local-dev-key"
+   uv run --extra sip chatgpt-sip --listen-ip 127.0.0.1 --sip-port 5066 --rtp-port 40006 --text "Responde brevemente en español a la prueba de voz."
+   ```
+
+3. In terminal B, run the SIP client, which sends an INVITE, PCMU/8000 RTP and
+   BYE, then reports received return audio:
+
+   ```powershell
+   uv run --extra sip python scripts/sip_rtp_smoke.py
+   ```
+
+   The default 440 Hz tone verifies RTP transport and codec handling. To test a
+   spoken turn, pass a short uncompressed PCM WAV (8, 16, 24, or 32 bit):
+
+   ```powershell
+   uv run --extra sip python scripts/sip_rtp_smoke.py --wav "C:\audio\prueba.wav"
+   ```
+
+4. A successful transport check reports `SIP INVITE: 200 OK`, received RTP
+   packets, and `SIP BYE: 200`. The tone can be treated as noise and receive
+   only silence; that still validates the transport. For a voice check, use a
+   spoken WAV and confirm its PCM peak is greater than zero. `Ctrl+C` stops the
+   gateway. All ports bind to loopback by default.
+
 ## Observed behavior and limits
 
 The private upstream exchange is a multipart SDP+session request to
