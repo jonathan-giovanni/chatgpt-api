@@ -55,6 +55,12 @@ def _validated_offer(value: Any) -> str:
         raise VoiceSignallingError("offer_sdp must be a WebRTC SDP offer", 400)
     if len(value.encode("utf-8")) > MAX_OFFER_BYTES or "m=audio" not in value:
         raise VoiceSignallingError("offer_sdp must contain audio and be at most 64 KiB", 400)
+    return _sdp_line_endings(value)
+
+
+def _sdp_line_endings(value: str) -> str:
+    # SDP records, including the last one, must end in a newline. str.strip()
+    # drops that terminator and Chromium reports the last attribute as invalid.
     return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n").rstrip("\r\n") + "\r\n"
 
 
@@ -264,7 +270,10 @@ def _post_offer(
         raise VoiceSignallingError("ChatGPT voice limit reached", 429)
     if response.status_code not in {200, 201}:
         raise VoiceSignallingError(f"ChatGPT voice signalling returned HTTP {response.status_code}")
-    answer = response.text.strip()
+    answer = response.text
     if not answer.startswith("v=0") or "m=audio" not in answer:
         raise VoiceSignallingError("ChatGPT voice signalling did not return audio SDP")
-    return answer
+    answer = _sdp_line_endings(answer)
+    # Optional SCTP SNAP data is not supported by all Chromium/aiortc versions.
+    # Keep this compatibility fix at the API boundary for every voice client.
+    return re.sub(r"(?m)^a=sctp-init:[^\r\n]*\r\n", "", answer)
