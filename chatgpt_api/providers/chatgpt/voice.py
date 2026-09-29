@@ -7,7 +7,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from chatgpt_api.core.errors import ProviderError
@@ -84,6 +84,21 @@ def bound_session(session_id: str | None) -> VoiceBinding | None:
 def bound_account(session_id: str | None) -> str | None:
     binding = bound_session(session_id)
     return binding.account if binding else None
+
+
+def bind_conversation(session_id: str, conversation_id: str, parent_message_id: str | None = None) -> VoiceBinding:
+    conversation_id = _optional_uuid(conversation_id, "conversation_id")
+    parent_message_id = _optional_uuid(parent_message_id, "parent_message_id")
+    with _SESSION_LOCK:
+        binding = _SESSIONS.get(session_id)
+        if binding is None or binding.deadline <= time.monotonic():
+            raise VoiceSignallingError("unknown or expired bridge_session_id", 404)
+        if binding.conversation_id and binding.conversation_id != conversation_id:
+            raise VoiceSignallingError("conversation_id cannot change during a voice session", 400)
+        binding = replace(binding, conversation_id=conversation_id,
+                          parent_message_id=parent_message_id or binding.parent_message_id)
+        _SESSIONS[session_id] = binding
+        return binding
 
 
 def release_session(session_id: Any) -> bool:

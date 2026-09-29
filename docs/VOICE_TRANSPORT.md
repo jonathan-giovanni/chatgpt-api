@@ -6,7 +6,7 @@ Bridge Console Test Lab at `http://127.0.0.1:8080/#test-lab`. It shares the chat
 test's selected Project, model, conversation UUID, initial text, and text
 attachments. It accepts a local audio file or microphone. The ChatGPT credential
 stays on the bridge. Media flows through WebRTC directly between the peer and
-ChatGPT; the bridge handles only SDP and optional chat preparation.
+ChatGPT; the bridge handles SDP, optional chat preparation, and text event fan-out.
 
 The wrapper watches local and returned audio without injecting health-check
 messages into the chat. It closes the flow when the remote audio track ends,
@@ -21,7 +21,7 @@ reconnects are attempted twice; if they fail, the session is released.
 3. In **Single message test**, select a Project (optional), model, existing conversation UUID if continuing, initial message, and text attachments.
 4. In **Voz en esta conversación** below it, choose a local audio file or microphone and start voice. The panel uses the same Project, model, UUID, message, and text files. An empty Project creates the conversation outside Projects.
 5. When the UUID is known, use the voice panel's follow-up composer for text or text-file turns in the same thread. The outer chat panel also receives that UUID for later chat tests. Finalizar releases the voice binding.
-6. The **Mensajes de voz y texto** panel below the voice controls reads that UUID automatically. You can also paste a UUID from a SIP call. It refreshes every four seconds while the Test Lab is visible.
+6. The **Mensajes de voz y texto** panel below the voice controls reads that UUID automatically. You can also paste a UUID from a SIP call. It loads history once and then receives text events. **Actualizar** explicitly reloads history; the panel does not poll ChatGPT.
 
 The local audio file is decoded into a browser media track. It is not uploaded
 as a chat attachment. The panel caps it at 20 MiB and five minutes. Microphone
@@ -111,11 +111,11 @@ The response contains the selected ChatGPT account and ordered messages with
 The bridge uses the saved account for known UUIDs. For an existing ChatGPT
 conversation that the bridge has not seen, it checks the configured accounts
 and saves the successful account association. `?account=<alias>` selects one
-configured account explicitly. The dashboard polls this read-only endpoint
-every four seconds, so new or revised text appears after ChatGPT writes it to
-the conversation. After HTTP 429 it pauses for one minute; other failures
-wait at least fifteen seconds before retrying. It does not send a prompt or
-change the conversation.
+configured account explicitly. This endpoint performs one read when requested;
+it does not send a prompt or change the conversation. Repeatedly downloading
+the full history was observed to trigger HTTP 429, so the dashboard now uses
+the event stream below instead of periodic history requests. If the initial
+history load is rate-limited, it stops and asks for a manual retry in a minute.
 
 This endpoint is a history snapshot, not token-by-token transcription. Voice
 turns appear as text only if ChatGPT includes their transcription in its
@@ -123,7 +123,72 @@ conversation history. `untranscribed_audio_messages` counts visible audio
 nodes with no text; the bridge does not invent missing words. A new voice call
 without initial text can return `conversation_id: null` until ChatGPT creates
 the thread and its UUID becomes available. For a SIP call with initial text or
-an existing UUID, the gateway prints `SIP conversation UUID: ...` in its logs.
+an existing UUID, or when the data channel announces a new conversation, the
+gateway prints `SIP conversation UUID: ...` in its logs.
+
+### Live text by conversation UUID
+
+Open one authenticated stream from any HTTP client:
+
+```shell
+curl -N -H "Authorization: Bearer <bridge-key>" \
+  http://127.0.0.1:8000/v1/chatgpt/conversations/<UUID>/events
+```
+
+The stream first sends the available timeline, then upserts individual
+messages as their text or status changes. Replace messages by `message.id`;
+do not append the entire text again. Roles and UTC timestamps are preserved.
+
+```text
+id: 0
+event: snapshot
+data: {"id":0,"type":"snapshot","conversation_id":"<UUID>","account":"main-free","messages":[],"untranscribed_audio_messages":0}
+
+id: 1
+event: message
+data: {"id":1,"type":"message","conversation_id":"<UUID>","message":{"id":"<message-id>","role":"user","text":"Hola","created_at":"2026-09-29T10:00:00Z","status":"in_progress"}}
+```
+
+SSE heartbeats are local comments, every 15 seconds. They do not query ChatGPT
+or send conversation messages. Reconnects receive a current cached snapshot,
+so clients recover without repeating an upstream history request. The cache
+is in memory, capped at 128 conversations, 2,000 messages per conversation,
+and one hour of inactivity. A server restart requires a new snapshot; this
+component is intended for a single bridge process. It does not introduce a
+database of private transcripts or a background ChatGPT polling worker.
+
+Live text comes from the **active call owned by the wrapper**. A UUID alone
+does not subscribe to voice calls started separately in ChatGPT Web. Their
+stored text is available through the history endpoint or manual **Actualizar**.
+The bridge forwards only the text ChatGPT provides; it does not run a separate
+speech recognizer or invent missing transcription.
+
+### External WebRTC clients
+
+The integrated Test Lab and SIP gateway already forward their received events.
+Other WebRTC clients need one data channel listener and the following POST:
+
+```http
+POST /v1/chatgpt/voice/sessions/vs_<opaque-id>/events
+Authorization: Bearer <bridge-key>
+Content-Type: application/json
+
+{"sequence":0,"events":[{"type":"data_message","data":"<JSON received from the data channel>"}]}
+```
+
+Keep events in arrival order. Batch up to 50 events and 512 KiB, increment
+`sequence` after acknowledgement, and reuse the same sequence when retrying
+that batch. Continue the sequence when reconnecting the same bridge session.
+The response contains `accepted` and the discovered `conversation_id`.
+Expired/released sessions are rejected; a bound conversation cannot change
+UUID or account. Only message deltas and conversation announcements are kept.
+
+The observed upstream frames are `data_message` envelopes containing
+`startup_telemetry`, `chat_message_delta`, and `conversation_update`. Message
+deltas carry compressed `c`, `p`, `o`, and `v` fields: unchanged counters,
+operations or paths can be omitted. The shared decoder preserves that state,
+applies append/replace patches, and publishes both user and assistant text.
+SIP uses the same decoder and SSE API as the browser.
 
 On network loss, create a new offer and call the same route with only
 `offer_sdp`, `voice`, and `bridge_session_id`. The bridge reuses the same account,
@@ -211,11 +276,9 @@ Project, a later text-file turn used the same UUID, and a SIP client exchanged
 PCMU RTP with nonzero return audio. These observations are not a stable public
 contract.
 
-The integrated browser established bidirectional audio but did not open its
-DataChannel after an optional `a=sctp-init` answer attribute was removed for SDP
-compatibility. In-call text/captions through that DataChannel are therefore not
-validated in that browser; the page can still send text and attachments over
-HTTP once a UUID is known. When text and voice are sent simultaneously, ordering
+DataChannel support depends on the peer implementation; audio alone does not
+prove the text channel is open. The UI reports when its data channel has not
+opened, and history remains available on demand. When text and voice are sent simultaneously, ordering
 of turns depends on ChatGPT upstream. Send one text turn at a time when order
 matters.
 

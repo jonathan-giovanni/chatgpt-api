@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from chatgpt_api.api.admin_store import BridgeAdminStore
 from chatgpt_api.api.config import OpenAICompatConfig
+from chatgpt_api.api.conversation_stream import ConversationStreams, decode_voice_batch
 from chatgpt_api.api.file_inputs import file_content_part, validate_file_parts
 from chatgpt_api.api.http_utils import (
     authorize as _authorize,
@@ -70,7 +71,9 @@ from chatgpt_api.providers.chatgpt.projects import (
 )
 from chatgpt_api.providers.chatgpt.conversation_history import conversation_timeline
 from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport
-from chatgpt_api.providers.chatgpt.voice import VoiceSignallingError, negotiate_voice, release_session
+from chatgpt_api.providers.chatgpt.voice import (
+    VoiceSignallingError, bind_conversation, bound_session, negotiate_voice, release_session,
+)
 
 
 
@@ -1018,9 +1021,152 @@ def _conversation_messages_response(
     return 404, {"error": {"message": "conversation not found", "type": "not_found"}}
 
 
+def _ingest_voice_events(
+    config: OpenAICompatConfig, streams: ConversationStreams, session_id: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    binding = bound_session(session_id)
+    if binding is None:
+        raise VoiceSignallingError("unknown or expired bridge_session_id", 404)
+    sequence = body.get("sequence")
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or not 0 <= sequence <= 2**53 - 1:
+        raise ValueError("sequence must be a non-negative integer")
+    events = decode_voice_batch(body.get("events"))
+    feed = streams.feed(session_id)
+    with feed.lock:
+        if sequence <= feed.sequence:
+            return {"accepted": 0, "conversation_id": feed.conversation_id, "duplicate": True}
+        conversation_id = binding.conversation_id or feed.conversation_id
+        parent_id = None
+        # Validate the entire batch before applying any append operations.
+        for event in events:
+            payload = event.get("payload", event)
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("conversation_id"):
+                if not isinstance(payload["conversation_id"], str):
+                    raise ValueError("conversation_id must be a UUID")
+                candidate = str(uuid.UUID(payload["conversation_id"]))
+                if conversation_id and candidate != conversation_id:
+                    raise ValueError("conversation_id cannot change during a voice session")
+                conversation_id = candidate
+            if event["type"] == "conversation_update" and payload.get("parent_message_id"):
+                if not isinstance(payload["parent_message_id"], str):
+                    raise ValueError("parent_message_id must be a UUID")
+                parent_id = str(uuid.UUID(payload["parent_message_id"]))
+        channel = None
+        if conversation_id:
+            binding = bind_conversation(session_id, conversation_id, parent_id)
+            channel = streams.channel(conversation_id, binding.account)
+            if parent_id:
+                _admin_store(config).upsert_conversation_session(
+                    conversation_id=conversation_id, parent_message_id=parent_id,
+                    account=binding.account, project_id=binding.project_id,
+                )
+        for event in events:
+            if event["type"] == "chat_message_delta":
+                message = feed.decoder.apply(event)
+                if message:
+                    feed.pending[message["id"]] = message
+                    if channel:
+                        channel.publish(message)
+        if channel:
+            for message in feed.pending.values():
+                channel.publish(message)
+            feed.pending.clear()
+        while len(feed.pending) > 128:
+            feed.pending.popitem(last=False)
+        feed.sequence = sequence
+        feed.conversation_id = conversation_id
+        return {"accepted": len(events), "conversation_id": conversation_id}
+
+
+def _stream_conversation_events(
+    handler: BaseHTTPRequestHandler, config: OpenAICompatConfig, router: AccountRouter,
+    streams: ConversationStreams, conversation_id: str, requested_account: str | None,
+    *, refresh: bool = False,
+) -> None:
+    try:
+        conversation_id = str(uuid.UUID(conversation_id))
+    except ValueError:
+        _send_json(handler, 400, {"error": {"message": "conversation_id must be a UUID", "type": "invalid_request_error"}})
+        return
+    channel = streams.known(conversation_id)
+    if channel and requested_account and channel.account.lower() != requested_account.lower():
+        _send_json(handler, 400, {"error": {"message": "conversation_id belongs to another account", "type": "invalid_request_error"}})
+        return
+    if channel is None:
+        with streams.initial_history_lock:
+            channel = streams.known(conversation_id)
+            if channel is None:
+                status, snapshot = _conversation_messages_response(config, router, conversation_id, requested_account)
+                if status != 200:
+                    _send_json(handler, status, snapshot)
+                    return
+                try:
+                    channel = streams.channel(conversation_id, snapshot["account"])
+                except ValueError as exc:
+                    _send_json(handler, 503, {"error": {"message": str(exc), "type": "capacity_error"}})
+                    return
+                channel.seed(snapshot)
+    if not channel.history_loaded or refresh:
+        with channel.history_lock:
+            if not channel.history_loaded or refresh:
+                status, snapshot = _conversation_messages_response(config, router, conversation_id, requested_account)
+                if status == 200:
+                    channel.seed(snapshot, refresh=refresh, conversation_id=conversation_id)
+                elif refresh:
+                    _send_json(handler, status, snapshot)
+                    return
+                else:
+                    # Newly created voice threads may not be readable yet. Their
+                    # data channel already supplies the text; never poll to wait.
+                    channel.history_loaded = True
+                    if status != 404:
+                        channel.history_warning = (
+                            "No se pudo cargar el historial anterior. El texto en directo sigue disponible; "
+                            "usa Actualizar para recuperar los mensajes anteriores."
+                        )
+    with channel.condition:
+        channel.subscribers += 1
+    try:
+        _send_sse_headers(handler, {"X-Accel-Buffering": "no"})
+        handler.connection.settimeout(20)
+        # Reconnects always receive the current local snapshot, so restart or
+        # replay-window gaps cannot silently lose earlier text.
+        snapshot = channel.snapshot(conversation_id)
+        _write_conversation_event(handler, snapshot)
+        after = snapshot["id"]
+        while True:
+            events = channel.wait(after)
+            if events is None:
+                snapshot = channel.snapshot(conversation_id)
+                _write_conversation_event(handler, snapshot)
+                after = snapshot["id"]
+            elif events:
+                for event in events:
+                    _write_conversation_event(handler, {**event, "conversation_id": conversation_id})
+                    after = event["id"]
+            else:
+                handler.wfile.write(b": keepalive\n\n")
+                handler.wfile.flush()
+    except (OSError, _ClientDisconnected):
+        pass
+    finally:
+        with channel.condition:
+            channel.subscribers -= 1
+        handler.close_connection = True
+
+
+def _write_conversation_event(handler: BaseHTTPRequestHandler, event: dict[str, Any]) -> None:
+    body = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    handler.wfile.write(f"id: {event['id']}\nevent: {event['type']}\ndata: {body}\n\n".encode("utf-8"))
+    handler.wfile.flush()
+
+
 def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = None):
     router = router or AccountRouter(_accounts_for_config(config), config.account_strategy)
     _configure_account_limits(config, router)
+    conversation_streams = ConversationStreams()
 
     class OpenAICompatHandler(BaseHTTPRequestHandler):
         server_version = "chatgpt-api-openai-compat/0.1"
@@ -1092,9 +1238,16 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             if path == "/v1/models":
                 _send_json(self, 200, _models_response(config))
                 return
-            conversation_match = re.fullmatch(r"/v1/chatgpt/conversations/([^/]+)/messages", path)
+            conversation_match = re.fullmatch(r"/v1/chatgpt/conversations/([^/]+)/(messages|events)", path)
             if conversation_match:
                 requested_account = (query.get("account") or [""])[-1].strip() or None
+                if conversation_match.group(2) == "events":
+                    _stream_conversation_events(
+                        self, config, router, conversation_streams,
+                        conversation_match.group(1), requested_account,
+                        refresh=_query_value(query, "refresh") == "1",
+                    )
+                    return
                 status, payload = _conversation_messages_response(
                     config, router, conversation_match.group(1), requested_account
                 )
@@ -1136,6 +1289,21 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             if not _authorize(self, config.api_key):
                 return
             path = urlparse(self.path).path
+            voice_events_match = re.fullmatch(r"/v1/chatgpt/voice/sessions/(vs_[a-f0-9]{32})/events", path)
+            if voice_events_match:
+                try:
+                    length = int(self.headers.get("content-length", "0") or "0")
+                    if not 0 < length <= 512 * 1024:
+                        raise ValueError("voice events must contain JSON within 512 KiB")
+                    result = _ingest_voice_events(
+                        config, conversation_streams, voice_events_match.group(1), _read_json_body(self)
+                    )
+                    _send_json(self, 200, result)
+                except VoiceSignallingError as exc:
+                    _send_json(self, exc.status, {"error": {"message": str(exc), "type": "voice_signalling_error"}})
+                except ValueError as exc:
+                    _send_json(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                return
             if path in {"/v1/chatgpt/voice/sessions", "/v1/chatgpt/voice/sessions/release"}:
                 try:
                     length = int(self.headers.get("content-length", "0") or "0")
@@ -1144,6 +1312,7 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
                     body = _read_json_body(self)
                     if path.endswith("/release"):
                         result = {"released": release_session(body.get("bridge_session_id"))}
+                        conversation_streams.release(body.get("bridge_session_id"))
                     else:
                         result = asyncio.run(_start_voice_session(config, router, body))
                     _send_json(self, 200, result)

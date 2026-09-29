@@ -24,6 +24,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from chatgpt_api.providers.chatgpt.voice_events import VoiceEventRelay
+
 
 def decode_pcmu(payload: bytes) -> bytes:
     """Decode G.711 µ-law octets to little-endian signed PCM16."""
@@ -160,6 +162,7 @@ class Call:
     last_rtp_at: float = field(default_factory=time.monotonic)
     last_voice_at: float = field(default_factory=time.monotonic)
     rtp_watchdog_task: asyncio.Task[Any] | None = None
+    voice_event_relay: Any = None
 
 
 class RtpInputTrack:
@@ -361,7 +364,12 @@ class SipGateway:
         connected = asyncio.Event()
         call.input_track = RtpInputTrack()
         pc.addTrack(call.input_track.track)
-        pc.createDataChannel("oai-events", negotiated=True, id=0)
+        channel = pc.createDataChannel("oai-events", negotiated=True, id=0)
+
+        @channel.on("message")
+        def on_message(raw: Any) -> None:
+            if self.call is call and call.peer is pc and call.voice_event_relay:
+                call.voice_event_relay.enqueue(raw)
 
         @pc.on("track")
         def on_track(track: Any) -> None:
@@ -396,6 +404,14 @@ class SipGateway:
         response.raise_for_status()
         result = response.json()
         call.bridge_session_id = result["bridge_session_id"]
+        if call.voice_event_relay is None:
+            def received_conversation(conversation_id: str) -> None:
+                if call.conversation_id != conversation_id:
+                    call.conversation_id = conversation_id
+                    print(f"SIP conversation UUID: {conversation_id}", flush=True)
+            call.voice_event_relay = VoiceEventRelay(
+                self.bridge_url, self.api_key, call.bridge_session_id, received_conversation,
+            )
         returned_conversation_id = result.get("conversation_id")
         if returned_conversation_id and returned_conversation_id != call.conversation_id:
             call.conversation_id = returned_conversation_id
@@ -508,6 +524,8 @@ class SipGateway:
             call.rtp_watchdog_task.cancel()
         if call.peer:
             await call.peer.close()
+        if call.voice_event_relay:
+            await call.voice_event_relay.close()
         if call.bridge_session_id:
             try:
                 async with httpx.AsyncClient(timeout=5) as client:

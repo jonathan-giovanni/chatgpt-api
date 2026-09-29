@@ -1,11 +1,8 @@
 <script lang="ts">
-  type TimelineMessage = {
-    id: string;
-    role: "user" | "assistant";
-    text: string;
-    created_at: string | null;
-    status: string | null;
-  };
+  import {
+    readConversationEvents,
+    type TimelineMessage,
+  } from "./conversationStream";
 
   let {
     apiKey,
@@ -27,8 +24,10 @@
   let updatedAt = $state("");
   let error = $state("");
   let loading = $state(false);
+  let streamState = $state("");
   let refreshNow = $state(0);
   let displayedId = "";
+  let requestedRefresh = 0;
 
   $effect(() => {
     const id = conversationId.trim();
@@ -42,7 +41,8 @@
     const id = lookupId.trim();
     const url = baseUrl.replace(/\/+$/, "");
     const key = apiKey;
-    void refreshNow;
+    const refreshRequested = refreshNow !== requestedRefresh;
+    requestedRefresh = refreshNow;
     if (id !== displayedId) {
       displayedId = id;
       messages = [];
@@ -50,6 +50,7 @@
       account = "";
       updatedAt = "";
       error = "";
+      streamState = "";
     }
     if (!UUID.test(id)) {
       messages = [];
@@ -59,57 +60,94 @@
       return;
     }
     let cancelled = false;
-    let pending = false;
-    let nextRequestAt = 0;
     const controller = new AbortController();
-    async function refresh() {
-      if (pending || cancelled || Date.now() < nextRequestAt) return;
-      pending = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    async function connect() {
       loading = true;
-      try {
-        const response = await fetch(
-          `${url}/chatgpt/conversations/${encodeURIComponent(id)}/messages`,
-          {
-            headers: key ? { Authorization: `Bearer ${key}` } : {},
-            cache: "no-store",
-            signal: controller.signal,
-          },
-        );
-        const data = await response.json();
-        if (!response.ok) {
-          if (response.status === 429) {
-            nextRequestAt = Date.now() + 60_000;
-            throw new Error(
-              "ChatGPT ha limitado las consultas. Se reintentará en un minuto.",
-            );
+      streamState = "Conectando el flujo de texto…";
+      let retry = 0;
+      let refresh = refreshRequested;
+      while (!cancelled) {
+        try {
+          const response = await fetch(
+            `${url}/chatgpt/conversations/${encodeURIComponent(id)}/events${refresh ? "?refresh=1" : ""}`,
+            {
+              headers: key ? { Authorization: `Bearer ${key}` } : {},
+              cache: "no-store",
+              signal: controller.signal,
+            },
+          );
+          if (!response.ok) {
+            const data = await response.json();
+            if (response.status === 429) {
+              error =
+                "ChatGPT limitó la carga del historial. Pulsa Actualizar dentro de un minuto.";
+              streamState = "Historial pendiente.";
+              loading = false;
+              return;
+            }
+            if ([400, 401, 404].includes(response.status)) {
+              error = data.error?.message || `HTTP ${response.status}`;
+              streamState = "Flujo de texto no disponible.";
+              loading = false;
+              return;
+            }
+            throw new Error(data.error?.message || `HTTP ${response.status}`);
           }
-          throw new Error(data.error?.message || `HTTP ${response.status}`);
+          if (cancelled) return;
+          refresh = false;
+          retry = 0;
+          loading = false;
+          error = "";
+          streamState = "Texto por eventos · conectado.";
+          await readConversationEvents(response, (event) => {
+            if (cancelled || event.conversation_id !== id) return;
+            if (event.type === "snapshot") {
+              messages = event.messages || [];
+              account = event.account || "";
+              untranscribedAudio = event.untranscribed_audio_messages || 0;
+              error = event.history_warning || "";
+            } else if (event.type === "message" && event.message) {
+              const message = event.message;
+              const index = messages.findIndex(
+                (item) => item.id === message.id,
+              );
+              messages =
+                index < 0
+                  ? [...messages, message]
+                  : messages.map((item) =>
+                      item.id === message.id ? message : item,
+                    );
+              messages = [...messages].sort((a, b) =>
+                (a.created_at || "").localeCompare(b.created_at || ""),
+              );
+            }
+            updatedAt = new Date().toLocaleTimeString("es-ES");
+          });
+        } catch (cause) {
+          if (!cancelled) {
+            error = cause instanceof Error ? cause.message : String(cause);
+          }
         }
         if (cancelled) return;
-        nextRequestAt = 0;
-        messages = Array.isArray(data.messages) ? data.messages : [];
-        untranscribedAudio = Number(data.untranscribed_audio_messages) || 0;
-        account = String(data.account || "");
-        updatedAt = new Date().toLocaleTimeString("es-ES");
-        error = "";
-      } catch (cause) {
-        if (!cancelled) {
-          nextRequestAt = Math.max(nextRequestAt, Date.now() + 15_000);
-          error = cause instanceof Error ? cause.message : String(cause);
-        }
-      } finally {
-        pending = false;
-        if (!cancelled) loading = false;
+        loading = false;
+        streamState = "Reconectando el flujo de texto…";
+        await new Promise<void>((resolve) => {
+          const finish = () => {
+            if (retryTimer) clearTimeout(retryTimer);
+            controller.signal.removeEventListener("abort", finish);
+            resolve();
+          };
+          retryTimer = setTimeout(finish, Math.min(1000 * 2 ** retry++, 15000));
+          controller.signal.addEventListener("abort", finish, { once: true });
+        });
       }
     }
-    void refresh();
-    const timer = setInterval(() => {
-      if (!document.hidden) void refresh();
-    }, 4000);
+    void connect();
     return () => {
       cancelled = true;
       controller.abort();
-      clearInterval(timer);
+      if (retryTimer) clearTimeout(retryTimer);
     };
   });
 
@@ -137,8 +175,8 @@
         Mensajes de voz y texto
       </h2>
       <p class="mt-2 text-sm text-slate-400">
-        Consulta el hilo de ChatGPT por UUID. La lista se actualiza cada cuatro
-        segundos mientras esta página está abierta.
+        Consulta el hilo por UUID. Durante llamadas del wrapper, el texto llega
+        por eventos de WebRTC o SIP, sin consultas periódicas a ChatGPT.
       </p>
     </div>
     <button
@@ -161,6 +199,9 @@
     placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
     spellcheck="false"
   />
+  {#if streamState}
+    <p class="mt-2 text-xs text-sky-200" role="status">{streamState}</p>
+  {/if}
   {#if updatedAt}
     <p class="mt-2 text-xs text-slate-400">
       Cuenta: {account} · Actualizado: {updatedAt}
