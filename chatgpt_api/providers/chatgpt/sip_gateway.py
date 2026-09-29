@@ -143,6 +143,7 @@ class Call:
     peer: Any = None
     input_track: Any = None
     bridge_session_id: str | None = None
+    conversation_id: str | None = None
     task: asyncio.Task[Any] | None = None
     output_task: asyncio.Task[Any] | None = None
     last_response: bytes | None = None
@@ -395,6 +396,10 @@ class SipGateway:
         response.raise_for_status()
         result = response.json()
         call.bridge_session_id = result["bridge_session_id"]
+        returned_conversation_id = result.get("conversation_id")
+        if returned_conversation_id and returned_conversation_id != call.conversation_id:
+            call.conversation_id = returned_conversation_id
+            print(f"SIP conversation UUID: {returned_conversation_id}", flush=True)
         answer = re.sub(r"(?m)^a=sctp-init:[^\r\n]*(?:\r?\n|$)", "", result["answer_sdp"])
         await pc.setRemoteDescription(RTCSessionDescription(sdp=answer, type="answer"))
         await asyncio.wait_for(connected.wait(), timeout=20)

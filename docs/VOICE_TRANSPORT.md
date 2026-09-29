@@ -21,6 +21,7 @@ reconnects are attempted twice; if they fail, the session is released.
 3. In **Single message test**, select a Project (optional), model, existing conversation UUID if continuing, initial message, and text attachments.
 4. In **Voz en esta conversación** below it, choose a local audio file or microphone and start voice. The panel uses the same Project, model, UUID, message, and text files. An empty Project creates the conversation outside Projects.
 5. When the UUID is known, use the voice panel's follow-up composer for text or text-file turns in the same thread. The outer chat panel also receives that UUID for later chat tests. Finalizar releases the voice binding.
+6. The **Mensajes de voz y texto** panel below the voice controls reads that UUID automatically. You can also paste a UUID from a SIP call. It refreshes every four seconds while the Test Lab is visible.
 
 The local audio file is decoded into a browser media track. It is not uploaded
 as a chat attachment. The panel caps it at 20 MiB and five minutes. Microphone
@@ -76,6 +77,46 @@ Apply `answer_sdp` as the remote description. For a new call with no initial
 text, ChatGPT creates the conversation when speech or an in-call message arrives;
 the UUID may arrive later through a DataChannel event. The UUID can then be used
 with `POST /v1/chat/completions` for subsequent text turns and attachments.
+
+## Read the conversation text
+
+Any client can read the visible text timeline without sending a message into the
+conversation:
+
+```http
+GET /v1/chatgpt/conversations/<UUID>/messages
+Authorization: Bearer <bridge-key>
+```
+
+The response contains the selected ChatGPT account and ordered messages with
+`id`, `role` (`user` or `assistant`), `text`, `created_at` (UTC ISO 8601), and
+`status`. For example:
+
+```json
+{
+  "conversation_id": "b7f60d76-41d0-4de3-b661-f6f4f8798224",
+  "account": "main-free",
+  "messages": [
+    {"id": "<message-id>", "role": "user", "text": "Hola", "created_at": "2026-09-29T10:00:00Z", "status": "finished_successfully"}
+  ],
+  "untranscribed_audio_messages": 0
+}
+```
+
+The bridge uses the saved account for known UUIDs. For an existing ChatGPT
+conversation that the bridge has not seen, it checks the configured accounts
+and saves the successful account association. `?account=<alias>` selects one
+configured account explicitly. The dashboard polls this read-only endpoint
+every four seconds, so new or revised text appears after ChatGPT writes it to
+the conversation. It does not send a prompt or change the conversation.
+
+This endpoint is a history snapshot, not token-by-token transcription. Voice
+turns appear as text only if ChatGPT includes their transcription in its
+conversation history. `untranscribed_audio_messages` counts visible audio
+nodes with no text; the bridge does not invent missing words. A new voice call
+without initial text can return `conversation_id: null` until ChatGPT creates
+the thread and its UUID becomes available. For a SIP call with initial text or
+an existing UUID, the gateway prints `SIP conversation UUID: ...` in its logs.
 
 On network loss, create a new offer and call the same route with only
 `offer_sdp`, `voice`, and `bridge_session_id`. The bridge reuses the same account,

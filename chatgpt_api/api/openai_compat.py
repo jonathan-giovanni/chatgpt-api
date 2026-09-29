@@ -68,6 +68,7 @@ from chatgpt_api.providers.chatgpt.projects import (
     project_context,
     validate_project_mapping,
 )
+from chatgpt_api.providers.chatgpt.conversation_history import conversation_timeline
 from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport
 from chatgpt_api.providers.chatgpt.voice import VoiceSignallingError, negotiate_voice, release_session
 
@@ -966,6 +967,57 @@ async def _start_voice_session(
     return result
 
 
+def _conversation_messages_response(
+    config: OpenAICompatConfig,
+    router: AccountRouter,
+    conversation_id: str,
+    requested_account: str | None = None,
+) -> tuple[int, dict[str, Any]]:
+    try:
+        conversation_id = str(uuid.UUID(conversation_id))
+    except ValueError:
+        return 400, {"error": {"message": "conversation_id must be a UUID", "type": "invalid_request_error"}}
+
+    store = _admin_store(config)
+    session = store.get_conversation_session(conversation_id)
+    if requested_account:
+        account = next((item for item in router.accounts if item.lower() == requested_account.lower()), None)
+        if account is None:
+            return 400, {"error": {"message": "unknown account", "type": "invalid_request_error"}}
+        if session and session["account"] != account:
+            return 400, {"error": {"message": "conversation_id belongs to another account", "type": "invalid_request_error"}}
+        accounts = (account,)
+    else:
+        accounts = (session["account"],) if session else router.accounts
+
+    first_error: ProviderError | None = None
+    for account in accounts:
+        try:
+            snapshot = _provider_for_account(config, account).transport.conversation_snapshot(conversation_id)
+        except ProviderError as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+        if snapshot is None:
+            continue
+        timeline = conversation_timeline(snapshot)
+        parent_message_id = snapshot.get("current_node")
+        if not session and isinstance(parent_message_id, str) and parent_message_id:
+            store.upsert_conversation_session(
+                conversation_id=conversation_id,
+                parent_message_id=parent_message_id,
+                account=account,
+            )
+        return 200, {
+            "conversation_id": conversation_id,
+            "account": account,
+            **timeline,
+        }
+    if first_error is not None:
+        return _provider_error_status_and_payload(first_error)
+    return 404, {"error": {"message": "conversation not found", "type": "not_found"}}
+
+
 def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = None):
     router = router or AccountRouter(_accounts_for_config(config), config.account_strategy)
     _configure_account_limits(config, router)
@@ -1039,6 +1091,14 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
                 return
             if path == "/v1/models":
                 _send_json(self, 200, _models_response(config))
+                return
+            conversation_match = re.fullmatch(r"/v1/chatgpt/conversations/([^/]+)/messages", path)
+            if conversation_match:
+                requested_account = (query.get("account") or [""])[-1].strip() or None
+                status, payload = _conversation_messages_response(
+                    config, router, conversation_match.group(1), requested_account
+                )
+                _send_json(self, status, payload)
                 return
             if path in {"/v1/chatgpt/usage", "/v1/chatgpt/remaining", "/v1/chatgpt/usage/live"}:
                 usage = asyncio.run(_account_usage_response(config, router))

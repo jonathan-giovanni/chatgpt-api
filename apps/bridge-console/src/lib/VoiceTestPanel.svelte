@@ -62,7 +62,6 @@
   let followup = $state("");
   let followupFiles = $state<File[]>([]);
   let followupFileError = $state("");
-  let messages = $state<string[]>([]);
   let remoteAudio: HTMLAudioElement;
 
   let peer: RTCPeerConnection | null = null;
@@ -87,10 +86,6 @@
   let userTurnPending = false;
   let remoteWasActive = false;
   let requestOptions: Record<string, unknown> = {};
-
-  function append(message: string) {
-    messages = [...messages.slice(-29), message];
-  }
 
   function powerShellQuote(value: string) {
     return `'${value.replace(/'/g, "''")}'`;
@@ -308,15 +303,6 @@
         ? event.payload
         : event;
     updateConversation(payload.conversation_id);
-    const delta = payload.delta || payload.text;
-    if (
-      (event.type === "chat_message_delta" ||
-        payload.type === "chat_message_delta") &&
-      typeof delta === "string" &&
-      delta.trim()
-    ) {
-      append(`ChatGPT: ${delta}`);
-    }
   }
 
   async function waitForIce(connection: RTCPeerConnection) {
@@ -469,7 +455,6 @@
     }
     bridgeSessionId = result.bridge_session_id || bridgeSessionId;
     updateConversation(result.conversation_id);
-    if (result.initial_response) append(`ChatGPT: ${result.initial_response}`);
     let answer = result.answer_sdp || "";
     try {
       await connection.setRemoteDescription({ type: "answer", sdp: answer });
@@ -491,7 +476,7 @@
         channel.readyState !== "open"
       ) {
         status =
-          "Audio conectado. Este navegador no abrió el canal de datos; usa la continuación HTTP con UUID.";
+          "Audio conectado. Consulta los mensajes del hilo por UUID en el panel inferior.";
       }
     }, 8000);
   }
@@ -636,10 +621,6 @@
         throw new Error(
           result.error?.message || `Error HTTP ${response.status}`,
         );
-      append(`Tú: ${text}`);
-      append(
-        `ChatGPT: ${result.choices?.[0]?.message?.content || "(sin texto)"}`,
-      );
       followup = "";
       followupFiles = [];
       status = "Respuesta añadida al mismo hilo.";
@@ -788,12 +769,6 @@
     {status}
   </p>
   <audio bind:this={remoteAudio} class="mt-3 w-full" autoplay controls></audio>
-  {#if messages.length}<div
-      class="mt-3 max-h-36 overflow-auto rounded-xl border border-white/10 bg-black/25 p-3 text-sm text-slate-300"
-      aria-live="polite"
-    >
-      {#each messages as message}<p>{message}</p>{/each}
-    </div>{/if}
 
   {#if active && conversationId.trim()}
     <form class="mt-4 grid gap-2" onsubmit={sendFollowup}>

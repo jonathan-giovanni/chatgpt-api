@@ -231,6 +231,16 @@ class ChatGPTWebTransport:
         return _json_response(response)
 
     def conversation_parent_message_id(self, conversation_id: str) -> str | None:
+        payload = self.conversation_snapshot(conversation_id)
+        if payload is None:
+            return None
+        current_node = payload.get("current_node")
+        if isinstance(current_node, str) and current_node:
+            return current_node
+        return _latest_message_id_from_value(payload)
+
+    def conversation_snapshot(self, conversation_id: str) -> dict[str, Any] | None:
+        """Read a conversation without sending a new message to ChatGPT."""
         self.ensure_configured()
         try:
             from curl_cffi import requests
@@ -238,23 +248,26 @@ class ChatGPTWebTransport:
             raise ProviderNotConfigured("curl_cffi is required for ChatGPT Web transport") from exc
 
         try:
+            headers = _conversation_headers(self.auth.request_headers())
+            headers["accept"] = "application/json"
             response = requests.get(
                 f"{self.endpoints.base_url}/backend-api/conversation/{conversation_id}",
-                headers=_conversation_headers(self.auth.request_headers()),
+                headers=headers,
                 impersonate=self.impersonate,
-                timeout=self.timeout,
+                timeout=min(self.timeout, 15.0),
             )
         except Exception as exc:
             raise ProviderError(f"ChatGPT conversation lookup failed: {exc}") from exc
+        if response.status_code == 404:
+            return None
         if response.status_code >= 400:
             raise ProviderError(
                 f"ChatGPT conversation lookup failed: {response.status_code} {_body_preview(response)}"
             )
         payload = _json_response(response)
-        current_node = payload.get("current_node")
-        if isinstance(current_node, str) and current_node:
-            return current_node
-        return _latest_message_id_from_value(payload)
+        if not payload:
+            raise ProviderError("ChatGPT conversation lookup returned an empty or invalid JSON response")
+        return payload
 
     def stop_conversation(
         self,

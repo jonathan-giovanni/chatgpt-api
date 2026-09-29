@@ -12,6 +12,7 @@
   import ResponseFieldGuide from "./lib/ResponseFieldGuide.svelte";
   import Textarea from "./lib/Textarea.svelte";
   import VoiceTestPanel from "./lib/VoiceTestPanel.svelte";
+  import ConversationTranscript from "./lib/ConversationTranscript.svelte";
 
   const DEFAULT_API_KEY = "local-dev-key";
   const DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1";
@@ -3962,6 +3963,8 @@
             initialFiles={voiceTextFiles}
             onConversationChange={(id) => chatConversationId = id}
           />
+
+          <ConversationTranscript {apiKey} {baseUrl} conversationId={chatConversationId} />
 
           <article
             class="rounded-[2rem] border border-white/10 bg-slate-900/80 p-5"
