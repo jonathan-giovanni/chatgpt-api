@@ -41,6 +41,11 @@ GET  /health
 GET  /v1/models
 GET  /v1/chatgpt/usage
 POST /v1/chat/completions
+POST /v1/chatgpt/voice/sessions
+POST /v1/chatgpt/voice/sessions/{bridge_session_id}/events
+POST /v1/chatgpt/voice/sessions/release
+GET  /v1/chatgpt/conversations/{uuid}/messages
+GET  /v1/chatgpt/conversations/{uuid}/events
 POST /v1/images/generations
 POST /v1/images/edits
 POST /v1/chatgpt/vision
@@ -52,6 +57,54 @@ POST /v1/chatgpt/operations/{operation_id}/cancel
 Artifact downloads support both `GET` and `HEAD`. The server can restore a
 download by `file_id` from the admin DB after restart, provided the saved file
 still exists.
+
+## SIP/RTP call with live text
+
+The simplest client uses SIP/RTP for audio and one HTTP Server-Sent Events (SSE)
+connection for text. The bundled SIP gateway handles WebRTC signalling and
+forwards ChatGPT's text events to the bridge; a SIP client does not need to
+implement the voice-session or event-ingestion POST routes.
+
+1. Start the bridge and dashboard with
+   `docker compose up -d --build chatgpt-api bridge-console`.
+2. In a second terminal, run
+   `docker compose run --rm --build --service-ports sip-gateway`. To choose a
+   Project, voice, model, existing conversation UUID, or initial text, copy the
+   generated SIP command from the dashboard's **Test Lab**. With no Project or
+   UUID, the call starts a new conversation outside Projects.
+3. Call `sip:voice@127.0.0.1:5060` from MicroSIP using UDP, no password, and
+   codec PCMU/8000; disable STUN and SRTP. The gateway accepts one local call
+   at a time.
+4. Read `SIP conversation UUID: <UUID>` in the gateway terminal. With no
+   initial text or existing UUID, the UUID may appear only after speech creates
+   the conversation. Open the text stream in a third terminal:
+
+```powershell
+curl.exe -N -H "Authorization: Bearer local-dev-key" "http://127.0.0.1:8000/v1/chatgpt/conversations/<UUID>/events"
+```
+
+Replace `<UUID>` with the printed value and `local-dev-key` if you changed
+`CHATGPT_API_KEY`. Alternatively, paste the UUID into **Mensajes de voz y texto**
+in the dashboard. Both clients receive the same stream. The stream first sends
+an `event: snapshot` with available history, then `event: message` updates as
+ChatGPT supplies text during the call. Each message has `id`, `role` (`user` or
+`assistant`), `text`, `created_at` (UTC), and `status`. An update with the same
+message `id` replaces the prior version; it is not a new turn. The SSE connection
+can stay open after the SIP call ends until your HTTP client closes it.
+
+```text
+event: message
+data: {"id":1,"type":"message","conversation_id":"<UUID>","message":{"id":"<message-id>","role":"assistant","text":"Hola","created_at":"2026-09-29T10:00:00Z","status":"in_progress"}}
+```
+
+The first subscription may load history once. Reconnecting uses the bridge's
+cached snapshot and does not poll ChatGPT. Use `GET
+/v1/chatgpt/conversations/{uuid}/messages` for a one-time JSON history read, or
+add `?refresh=1` to the SSE URL only when you explicitly want to reload
+history. Audio with no transcription upstream has no text to stream. Live
+events cover calls made through this wrapper, not calls started independently
+on chatgpt.com. See [Voice transport](VOICE_TRANSPORT.md) for the WebRTC API,
+event-ingestion contract, SIP limits, and reconnection behavior.
 
 Supported response shapes:
 

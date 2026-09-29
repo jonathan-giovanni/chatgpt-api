@@ -698,6 +698,28 @@ Full route details: [docs/OPENAI_COMPATIBILITY.md](docs/OPENAI_COMPATIBILITY.md)
 | Bridge Console WebRTC voice | WebRTC audio track from microphone or a local audio file; optional initial text and text files share the chat context. | Experimental; available in Test Lab. | Open `http://127.0.0.1:8080/#test-lab`, choose a Project if wanted, then start voice. |
 | Docker SIP/RTP gateway | SIP/UDP plus RTP/PCMU (G.711 µ-law, 8 kHz). | Experimental; one local call at a time, loopback by default. | MicroSIP: server `127.0.0.1`, UDP `5060`, user `voice`, no password. |
 
+For a SIP call with live text, start the bridge and dashboard with
+`docker compose up -d --build chatgpt-api bridge-console`, then run
+`docker compose run --rm --build --service-ports sip-gateway` in another
+terminal. Call `sip:voice@127.0.0.1:5060` from MicroSIP using UDP and
+PCMU/8000. The gateway prints `SIP conversation UUID: <UUID>` when the
+conversation exists;
+it may appear after the first spoken turn. In a third terminal, stream that
+conversation's user and assistant text:
+
+```powershell
+curl.exe -N -H "Authorization: Bearer local-dev-key" "http://127.0.0.1:8000/v1/chatgpt/conversations/<UUID>/events"
+```
+
+Replace the UUID and, if configured, the bridge key. The dashboard's **Test
+Lab** can generate the gateway command with a Project, voice, model, initial
+text, or existing UUID and display the same text stream under **Mensajes de voz
+y texto**. The SIP gateway forwards events automatically; a SIP client needs
+only the audio call and SSE subscription. The stream sends one history snapshot
+and then message updates, with no periodic ChatGPT history requests. See the
+[API walkthrough](docs/OPENAI_COMPATIBILITY.md#siprtp-call-with-live-text) for
+event fields, limits, and caveats.
+
 Voice `answer_sdp` is normalized by the shared API for WebRTC and SIP/RTP,
 including the final CRLF terminator. Pass it directly to the peer connection
 without trimming; client-specific SDP patches are not required.
