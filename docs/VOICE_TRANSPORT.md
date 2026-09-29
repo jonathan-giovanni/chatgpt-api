@@ -73,7 +73,12 @@ bridge's local Project mappings. The response is:
 }
 ```
 
-Apply `answer_sdp` as the remote description. For a new call with no initial
+Apply `answer_sdp` directly as the remote description, without trimming it.
+The bridge normalizes SDP records to CRLF, retains the final line terminator,
+and removes the optional `a=sctp-init` extension for browser/aiortc compatibility.
+This applies to initial calls and reconnects for both WebRTC and SIP/RTP;
+ICE credentials, DTLS fingerprints and media attributes are preserved.
+For a new call with no initial
 text, ChatGPT creates the conversation when speech or an in-call message arrives;
 the UUID may arrive later through a DataChannel event. The UUID can then be used
 with `POST /v1/chat/completions` for subsequent text turns and attachments.
@@ -108,7 +113,9 @@ conversation that the bridge has not seen, it checks the configured accounts
 and saves the successful account association. `?account=<alias>` selects one
 configured account explicitly. The dashboard polls this read-only endpoint
 every four seconds, so new or revised text appears after ChatGPT writes it to
-the conversation. It does not send a prompt or change the conversation.
+the conversation. After HTTP 429 it pauses for one minute; other failures
+wait at least fifteen seconds before retrying. It does not send a prompt or
+change the conversation.
 
 This endpoint is a history snapshot, not token-by-token transcription. Voice
 turns appear as text only if ChatGPT includes their transcription in its

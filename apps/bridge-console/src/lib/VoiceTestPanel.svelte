@@ -455,14 +455,10 @@
     }
     bridgeSessionId = result.bridge_session_id || bridgeSessionId;
     updateConversation(result.conversation_id);
-    let answer = result.answer_sdp || "";
-    try {
-      await connection.setRemoteDescription({ type: "answer", sdp: answer });
-    } catch (error) {
-      if (!/^a=sctp-init:/m.test(answer)) throw error;
-      answer = answer.replace(/^a=sctp-init:[^\r\n]*(?:\r?\n|$)/gm, "");
-      await connection.setRemoteDescription({ type: "answer", sdp: answer });
-    }
+    await connection.setRemoteDescription({
+      type: "answer",
+      sdp: result.answer_sdp || "",
+    });
     status = `Negociado con ${result.account || "la cuenta configurada"}; esperando WebRTC…`;
     if (initialText.trim() && !result.initial_response) {
       lastInputActivityAt = Date.now();

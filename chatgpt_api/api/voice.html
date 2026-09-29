@@ -273,14 +273,7 @@
       }
       if (data.initial_response) append('ChatGPT: ' + data.initial_response);
       updateComposer();
-      try {
-        await pc.setRemoteDescription({type: 'answer', sdp: data.answer_sdp});
-      } catch (error) {
-        // Older embedded Chromium builds cannot parse the optional SCTP SNAP attribute.
-        if (!/^a=sctp-init:/m.test(data.answer_sdp)) throw error;
-        const compatibleSdp = data.answer_sdp.replace(/^a=sctp-init:[^\r\n]*(?:\r?\n|$)/gm, '');
-        await pc.setRemoteDescription({type: 'answer', sdp: compatibleSdp});
-      }
+      await pc.setRemoteDescription({type: 'answer', sdp: data.answer_sdp});
       status('Negociado con la cuenta ' + data.account + '. Esperando WebRTC…');
       setTimeout(() => {
         if (state.active && pc === state.pc && pc.connectionState === 'connected' && dc.readyState !== 'open') {

@@ -684,6 +684,10 @@ Full route details: [docs/OPENAI_COMPATIBILITY.md](docs/OPENAI_COMPATIBILITY.md)
 | Bridge Console WebRTC voice | WebRTC audio track from microphone or a local audio file; optional initial text and text files share the chat context. | Experimental; available in Test Lab. | Open `http://127.0.0.1:8080/#test-lab`, choose a Project if wanted, then start voice. |
 | Docker SIP/RTP gateway | SIP/UDP plus RTP/PCMU (G.711 µ-law, 8 kHz). | Experimental; one local call at a time, loopback by default. | MicroSIP: server `127.0.0.1`, UDP `5060`, user `voice`, no password. |
 
+Voice `answer_sdp` is normalized by the shared API for WebRTC and SIP/RTP,
+including the final CRLF terminator. Pass it directly to the peer connection
+without trimming; client-specific SDP patches are not required.
+
 ChatGPT's visible voice names use internal IDs in the request: Arbor=`fathom`
 (the default), Breeze=`breeze`, Ember=`ember`, Sol=`glimmer`, Cove=`cove`,
 Spruce=`orbit`, Vale=`vale`, Maple=`maple`, and Juniper=`juniper`. The older

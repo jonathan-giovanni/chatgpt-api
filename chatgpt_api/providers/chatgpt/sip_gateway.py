@@ -400,8 +400,7 @@ class SipGateway:
         if returned_conversation_id and returned_conversation_id != call.conversation_id:
             call.conversation_id = returned_conversation_id
             print(f"SIP conversation UUID: {returned_conversation_id}", flush=True)
-        answer = re.sub(r"(?m)^a=sctp-init:[^\r\n]*(?:\r?\n|$)", "", result["answer_sdp"])
-        await pc.setRemoteDescription(RTCSessionDescription(sdp=answer, type="answer"))
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=result["answer_sdp"], type="answer"))
         await asyncio.wait_for(connected.wait(), timeout=20)
 
     async def _reconnect(self, call: Call, delay: float = 0) -> None:

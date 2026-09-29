@@ -127,13 +127,56 @@ def test_voice_offer_uses_multipart_without_exposing_web_token(monkeypatch):
     monkeypatch.setattr(requests, "post", post)
     answer = voice._post_offer(ChatGPTAuthConfig(access_token="test-token"), "chrome", OFFER, "cove")
 
-    assert answer == ANSWER.strip()
+    assert answer == ANSWER
     assert captured["url"].endswith("/realtime/wm?dcid=0")
     assert captured["headers"]["authorization"] == "Bearer test-token"
     assert captured["headers"]["content-type"].startswith("multipart/form-data; boundary=")
     assert b'name="sdp"' in captured["data"]
     assert b'name="session"' in captured["data"]
     assert b"test-token" not in captured["data"]
+
+
+@pytest.mark.parametrize("line_ending", ["\r\n", "\n", "\r"])
+@pytest.mark.parametrize("terminated", [True, False])
+def test_voice_answer_terminates_every_sdp_record_without_changing_ice(monkeypatch, line_ending, terminated):
+    from curl_cffi import requests
+
+    lines = [
+        "v=0", "m=audio 9 UDP/TLS/RTP/SAVPF 111", "a=ice-ufrag:test+ufrag",
+        "a=fingerprint:sha-256 00:11:22", "a=ice-pwd:ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+    ]
+
+    class Response:
+        status_code = 201
+        text = line_ending.join(lines) + (line_ending if terminated else "")
+
+    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: Response())
+    answer = voice._post_offer(ChatGPTAuthConfig(access_token="test-token"), "chrome", OFFER, "fathom")
+
+    # A real browser rejects the final ice-pwd line if its terminator is lost.
+    assert answer == "\r\n".join(lines) + "\r\n"
+
+
+@pytest.mark.parametrize("at_end", [False, True])
+def test_voice_answer_removes_only_optional_sctp_snap_for_all_clients(monkeypatch, at_end):
+    from curl_cffi import requests
+
+    lines = [
+        "v=0", "m=audio 9 UDP/TLS/RTP/SAVPF 111", "a=ice-pwd:ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel", "a=sctp-port:5000",
+        "a=max-message-size:262144", "a=ice-ufrag:abcd",
+    ]
+    upstream_lines = list(lines)
+    upstream_lines.insert(len(lines) if at_end else 5, "a=sctp-init:optional-snap-data")
+
+    class Response:
+        status_code = 201
+        text = "\r\n".join(upstream_lines) + "\r\n"
+
+    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: Response())
+    answer = voice._post_offer(ChatGPTAuthConfig(access_token="test-token"), "chrome", OFFER, "fathom")
+
+    assert answer == "\r\n".join(lines) + "\r\n"
 
 
 def test_voice_offer_preserves_thread_model_and_project(monkeypatch):
