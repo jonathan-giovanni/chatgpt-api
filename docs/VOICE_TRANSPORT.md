@@ -220,6 +220,10 @@ publishes the standard local ports automatically:
 docker compose run --rm --build --service-ports sip-gateway
 ```
 
+For the shortest end-to-end SIP audio plus live text workflow, including the
+gateway's UUID and the SSE command, see the
+[API walkthrough](OPENAI_COMPATIBILITY.md#siprtp-call-with-live-text).
+
 The Bridge Console command includes the selected project, voice ID, model, UUID
 and text. Arbor (`fathom`) is the default voice, and the selected internal voice
 ID is passed to both WebRTC and SIP/RTP.
