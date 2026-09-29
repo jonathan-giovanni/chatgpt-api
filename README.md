@@ -104,7 +104,7 @@ downloads, and developer tooling.
 | File downloads | `GET/HEAD /v1/chatgpt/files/{id}/{filename}` | implemented |
 | Account usage and limits | `GET /v1/chatgpt/usage` | implemented when ChatGPT reports data |
 | Project-aware conversation continuity | `chatgpt_project` and `conversation_id` in chat requests | implemented |
-| Conversation text timeline | `GET /v1/chatgpt/conversations/{uuid}/messages` and Test Lab | implemented for text available in ChatGPT history; voice transcription depends on upstream |
+| Conversation text timeline | `GET /v1/chatgpt/conversations/{uuid}/messages` and `/events`; Test Lab | history snapshot plus event stream; live voice text comes from the wrapper's data channel |
 | WebRTC voice with selectable ChatGPT voice | `POST /v1/chatgpt/voice/sessions` and Bridge Console Test Lab | experimental; Arbor maps to `fathom` |
 | SIP/RTP local telephony | Docker `sip-gateway`, SIP/UDP and RTP/PCMU | experimental; one loopback call at a time |
 | Text/audio file input | chat content parts; UTF-8 text, WAV, and MP3 | implemented with bounded sizes |
@@ -127,7 +127,7 @@ Recent project updates include:
 - **Model discovery and Project routing:** modernizes model metadata and lets new chats target an optional ChatGPT Project.
 - **Text and audio attachments:** accepts bounded text-file and WAV/MP3 attachments in ordinary chats, including existing conversations. Audio files sent this way are generic attachments and do not guarantee transcription.
 - **Conversation continuity:** returns a conversation UUID and accepts it on later requests to continue the same ChatGPT conversation, preserving its account and Project routing.
-- **Conversation text timeline:** reads the visible branch of a conversation by UUID and shows user/assistant messages with timestamps in the Test Lab. The dashboard refreshes every four seconds; audio that has no upstream transcription is reported separately.
+- **Conversation text timeline and stream:** loads the visible history once by UUID, then updates user/assistant messages and timestamps from actual WebRTC or SIP data channel events. The dashboard listens over SSE, reconnects with a cached snapshot, and never polls ChatGPT for live text. Manual **Actualizar** reloads history. Audio without upstream transcription is reported separately.
 - **Experimental Web Voice and SIP/RTP:** the Bridge Console Test Lab includes a WebRTC voice panel wired to the selected Project, model, conversation UUID, initial text, and text attachments. It accepts a local audio file or microphone, detects audio-track closure, and ends idle calls after 30 seconds without voice activity, without adding health-check messages. The optional SIP/PCMU gateway runs in Docker with the bridge's configured credentials and local ports.
 - **ChatGPT voice IDs:** the UI keeps familiar voice names and sends their internal IDs. Arbor now sends `fathom` by default; Sol sends `glimmer` and Spruce sends `orbit`. The selected voice is passed through WebRTC and SIP/RTP, while ChatGPT still chooses the voice model. See [voice transport](docs/VOICE_TRANSPORT.md) for setup and limits.
 
@@ -149,9 +149,21 @@ internal voice ID correction:
 | Local SIP/PCMU call with spoken WAV | SIP INVITE/BYE returned `200`; 355 RTP packets sent, 1,537 received with non-silent PCM |
 | Docker SIP/RTP transport smoke | INVITE/BYE returned `200`; 150 RTP packets sent, 1,087 received; the tone validated transport only |
 
-The embedded browser did not open the optional WebRTC DataChannel, so in-call
-captions and DataChannel text are still experimental. Text and text files can
-use the same conversation UUID over the regular HTTP chat route.
+Additional checks on 2026-09-29 validated the conversation event stream:
+
+| Check | Result |
+| --- | --- |
+| Focused Python API, voice, SIP, history and event stream tests | `152 passed` |
+| Bridge Console check and production build | `0 errors, 0 warnings`; Vite build passed |
+| Browser WebRTC data channel with spoken WAV | channel opened; user/assistant text deltas and the conversation UUID were received and relayed |
+| SIP/PCMU with spoken WAV and text event relay | INVITE/BYE `200`; 259 RTP packets sent, 930 received, non-silent returned PCM; UUID discovered from data events |
+| Dashboard transcript and reconnect | existing history and reconstructed voice messages loaded over SSE; cached reconnects and local heartbeats made no upstream history requests in the HTTP regression test |
+
+The voice protocol and captions remain experimental because ChatGPT Web's
+upstream interface is private. Text and text files can use the same
+conversation UUID over the regular HTTP chat route. Live text events require
+the wrapper to own the voice call; other ChatGPT Web conversations remain
+available through an on-demand history read.
 
 Earlier checks were run on 2026-06-28 for the `/v1/images/edits` regression:
 
@@ -678,7 +690,9 @@ Full route details: [docs/OPENAI_COMPATIBILITY.md](docs/OPENAI_COMPATIBILITY.md)
 | --- | --- | --- | --- |
 | `POST /v1/chatgpt/voice/sessions` | JSON with `offer_sdp`, `voice`, and optional `project`, `conversation_id`, `model`, `text`, and `files` (files require text). | Experimental: uses ChatGPT Web's private voice signalling. | `{"offer_sdp":"v=0\r\nm=audio ...","voice":"fathom"}` |
 | `POST /v1/chatgpt/voice/sessions/release` | JSON with `bridge_session_id`. | Implemented; releases the local voice binding. | `{"bridge_session_id":"vs_<id>"}` |
-| `GET /v1/chatgpt/conversations/{uuid}/messages` | JSON response with ordered `messages` (`id`, `role`, `text`, `created_at`, `status`) and `untranscribed_audio_messages`; optional `?account=<alias>`. | Implemented read-only snapshot; poll for near-real-time updates. Text appears only when ChatGPT stores it in the conversation history. | `GET /v1/chatgpt/conversations/<UUID>/messages` |
+| `GET /v1/chatgpt/conversations/{uuid}/messages` | JSON response with ordered `messages` (`id`, `role`, `text`, `created_at`, `status`) and `untranscribed_audio_messages`; optional `?account=<alias>`. | Implemented read-only history snapshot, on demand. | `GET /v1/chatgpt/conversations/<UUID>/messages` |
+| `GET /v1/chatgpt/conversations/{uuid}/events` | Authenticated SSE: initial `snapshot`, then `message` upserts with the same message fields. | Experimental live voice stream from calls made through the wrapper; no upstream polling. Shared WebRTC/SIP stream, cached reconnects, optional `?refresh=1` for an explicit history reload. | `curl -N -H "Authorization: Bearer <bridge-key>" http://127.0.0.1:8000/v1/chatgpt/conversations/<UUID>/events` |
+| `POST /v1/chatgpt/voice/sessions/{bridge_session_id}/events` | JSON `sequence` and `events` (1–50 data channel events, at most 512 KiB). | Implemented event ingestion; automatic in Test Lab and SIP. Ordered sequences make retries idempotent. External WebRTC clients forward received events here. | `{"sequence":0,"events":[{"type":"data_message","data":"<received JSON>"}]}` |
 | `POST /v1/chat/completions` (conversation continuation) | JSON or SSE (`"stream": true`); supports `chatgpt_project` and `conversation_id`. | Implemented; UUID continues the same conversation and Project. | `{"model":"auto","chatgpt_project":"INCIDENCIAS","conversation_id":"<UUID>","messages":[...]}` |
 | File content in chat | JSON content parts; text files are UTF-8 and audio attachments accept WAV/MP3. | Implemented with request size limits; audio attachments do not guarantee transcription. | `{"filename":"notes.txt","file_data":"<base64>"}` |
 | Bridge Console WebRTC voice | WebRTC audio track from microphone or a local audio file; optional initial text and text files share the chat context. | Experimental; available in Test Lab. | Open `http://127.0.0.1:8080/#test-lab`, choose a Project if wanted, then start voice. |

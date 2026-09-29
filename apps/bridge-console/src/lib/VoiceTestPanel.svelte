@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import { VoiceEventRelay } from "./conversationStream";
 
   type TextAttachment = { filename: string; file_data: string };
   type ProjectOption = { alias: string; name: string; account: string };
@@ -57,6 +58,7 @@
   let sourceMode = $state<"file" | "mic">("file");
   let audioFile = $state<File | null>(null);
   let status = $state("Desconectado.");
+  let transcriptError = $state("");
   let busy = $state(false);
   let active = $state(false);
   let followup = $state("");
@@ -66,6 +68,7 @@
 
   let peer: RTCPeerConnection | null = null;
   let dataChannel: RTCDataChannel | null = null;
+  let voiceEvents: VoiceEventRelay | null = null;
   let inputStream: MediaStream | null = null;
   let audioContext: AudioContext | null = null;
   let decodedAudio: AudioBuffer | null = null;
@@ -86,6 +89,7 @@
   let userTurnPending = false;
   let remoteWasActive = false;
   let requestOptions: Record<string, unknown> = {};
+  let stopping = false;
 
   function powerShellQuote(value: string) {
     return `'${value.replace(/'/g, "''")}'`;
@@ -284,25 +288,7 @@
   }
 
   function handleDataMessage(raw: unknown) {
-    if (typeof raw !== "string") return;
-    let event: Record<string, any>;
-    try {
-      event = JSON.parse(raw);
-    } catch {
-      return;
-    }
-    if (event.type === "data_message" && typeof event.data === "string") {
-      try {
-        event = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-    }
-    const payload =
-      event.payload && typeof event.payload === "object"
-        ? event.payload
-        : event;
-    updateConversation(payload.conversation_id);
+    voiceEvents?.enqueue(raw);
   }
 
   async function waitForIce(connection: RTCPeerConnection) {
@@ -454,6 +440,17 @@
       return;
     }
     bridgeSessionId = result.bridge_session_id || bridgeSessionId;
+    if (bridgeSessionId && !voiceEvents) {
+      voiceEvents = new VoiceEventRelay(
+        baseUrl.replace(/\/+$/, ""),
+        apiKey,
+        bridgeSessionId,
+        updateConversation,
+        (message) => {
+          transcriptError = message;
+        },
+      );
+    }
     updateConversation(result.conversation_id);
     await connection.setRemoteDescription({
       type: "answer",
@@ -497,8 +494,10 @@
   }
 
   async function stop(reason = "Desconectado.") {
+    if (stopping) return;
+    stopping = true;
     active = false;
-    busy = false;
+    busy = true;
     generation += 1;
     if (retryTimer) clearTimeout(retryTimer);
     if (disconnectedTimer) clearTimeout(disconnectedTimer);
@@ -522,9 +521,14 @@
     remoteWasActive = false;
     fileStarted = false;
     if (remoteAudio) remoteAudio.srcObject = null;
+    const relay = voiceEvents;
+    voiceEvents = null;
+    await relay?.close();
     if (bridgeSessionId) void releaseSession(bridgeSessionId);
     bridgeSessionId = null;
     status = reason;
+    busy = false;
+    stopping = false;
   }
 
   async function start() {
@@ -532,6 +536,7 @@
     busy = true;
     active = true;
     retries = 0;
+    transcriptError = "";
     generation += 1;
     const currentGeneration = generation;
     try {
@@ -764,6 +769,9 @@
   >
     {status}
   </p>
+  {#if transcriptError}
+    <p class="mt-2 text-sm text-amber-200" role="status">{transcriptError}</p>
+  {/if}
   <audio bind:this={remoteAudio} class="mt-3 w-full" autoplay controls></audio>
 
   {#if active && conversationId.trim()}
