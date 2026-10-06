@@ -97,6 +97,71 @@ pre {
   backdrop-filter: blur(18px);
 }
 
+.console-topbar.account-healthy,
+.console-topbar.account-warning,
+.console-topbar.account-danger,
+.console-topbar.account-connecting {
+  --account-light: #59b9ff;
+  --account-haze: rgba(89, 185, 255, 0.12);
+  position: sticky;
+  isolation: isolate;
+  border-bottom-color: color-mix(in srgb, var(--account-light) 35%, transparent);
+  background:
+    radial-gradient(ellipse at 49% -85%, var(--account-haze), transparent 72%),
+    linear-gradient(90deg, rgba(5, 11, 20, .98), rgba(8, 17, 27, .96));
+  box-shadow: 0 12px 35px rgba(0, 0, 0, .22), 0 7px 35px var(--account-haze);
+  transition: background .45s ease, border-color .45s ease, box-shadow .45s ease;
+}
+.console-topbar.account-healthy { --account-light: #35e8aa; --account-haze: rgba(53, 232, 170, .16); }
+.console-topbar.account-warning { --account-light: #f4bc58; --account-haze: rgba(244, 188, 88, .16); }
+.console-topbar.account-danger { --account-light: #ff637e; --account-haze: rgba(255, 99, 126, .15); }
+.console-topbar.account-connecting { --account-light: #59b9ff; --account-haze: rgba(89, 185, 255, .16); }
+.console-topbar.account-healthy::after,
+.console-topbar.account-warning::after,
+.console-topbar.account-danger::after,
+.console-topbar.account-connecting::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--account-light) 38%, var(--account-light) 62%, transparent);
+  opacity: .8;
+  box-shadow: 0 0 20px var(--account-light);
+  pointer-events: none;
+}
+.api-command.account-healthy,
+.api-command.account-warning,
+.api-command.account-danger,
+.api-command.account-connecting {
+  border-color: color-mix(in srgb, var(--account-light) 28%, transparent);
+  background: color-mix(in srgb, var(--account-light) 8%, rgba(11, 24, 38, .8));
+  box-shadow: inset 0 1px rgba(255,255,255,.05), 0 0 22px var(--account-haze);
+  transition: border-color .4s, background .4s, box-shadow .4s;
+}
+.api-signal.account-healthy,
+.api-signal.account-warning,
+.api-signal.account-danger,
+.api-signal.account-connecting {
+  background: var(--account-light);
+  box-shadow: 0 0 6px var(--account-light), 0 0 20px var(--account-light);
+  animation: bridge-heartbeat 2.3s ease-in-out infinite;
+}
+.api-command .api-label strong { color: var(--account-light); }
+@keyframes bridge-heartbeat {
+  0%, 100% { transform: scale(.88); opacity: .75; }
+  35% { transform: scale(1.24); opacity: 1; }
+  53% { transform: scale(.95); opacity: .8; }
+  63% { transform: scale(1.12); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .api-signal.account-healthy,
+  .api-signal.account-warning,
+  .api-signal.account-danger,
+  .api-signal.account-connecting { animation: none; }
+}
+
 .console-brand,
 .api-command,
 .top-actions {

@@ -103,6 +103,7 @@ downloads, and developer tooling.
 | Deep Research report export | `chatgpt-deep-research` model alias | implemented |
 | File downloads | `GET/HEAD /v1/chatgpt/files/{id}/{filename}` | implemented |
 | Account usage and limits | `GET /v1/chatgpt/usage` | implemented when ChatGPT reports data |
+| Chrome account connector | `extensions/chrome-bridge`, `/v1/chatgpt/extension/*` | local pairing and encrypted session refresh; Chrome installation required |
 | Project-aware conversation continuity | `chatgpt_project` and `conversation_id` in chat requests | implemented |
 | Conversation text timeline | `GET /v1/chatgpt/conversations/{uuid}/messages` and `/events`; Test Lab | history snapshot plus event stream; live voice text comes from the wrapper's data channel |
 | WebRTC voice with selectable ChatGPT voice | `POST /v1/chatgpt/voice/sessions` and Bridge Console Test Lab | experimental; Arbor maps to `fathom` |
@@ -123,6 +124,8 @@ downloads, and developer tooling.
 ## Recent Contributions
 
 Recent project updates include:
+
+- **Chrome account connector:** a Manifest V3 extension checks localhost before an optional LAN IP, automatically links a matching existing account from a normal Chrome ChatGPT session, and refreshes its encrypted capture. Its pulse icon shows health and toggles automatic renewal two days before expiry; the dashboard header reflects account status. See [Chrome connector](docs/CHROME_EXTENSION.md) for setup and limits.
 
 - **Model discovery and Project routing:** modernizes model metadata and lets new chats target an optional ChatGPT Project.
 - **Text and audio attachments:** accepts bounded text-file and WAV/MP3 attachments in ordinary chats, including existing conversations. Audio files sent this way are generic attachments and do not guarantee transcription.
