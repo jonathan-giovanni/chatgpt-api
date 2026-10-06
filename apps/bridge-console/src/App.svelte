@@ -701,8 +701,8 @@
   let apiKey = $state(DEFAULT_API_KEY);
 
   let captureAccount = $state("main-free");
-  let extensionStatus = $state<Json>({ pending: [], clients: [], fingerprint: "" });
-  let extensionPairAccount = $state("");
+  let extensionStatus = $state<Json>({ accounts: [], clients: [], fingerprint: "" });
+  let usageCheckedTimestamp = $state(0);
   let captureText = $state("");
   let captureResult = $state<Json | null>(null);
   let captureModalOpen = $state(false);
@@ -868,6 +868,33 @@
   const systemState = $derived(
     status ? "online" : lastError ? "offline" : "checking",
   );
+  const headerAccount = $derived.by(() => {
+    const rows = Array.isArray(extensionStatus.accounts) ? extensionStatus.accounts : [];
+    return [...rows].sort((a, b) =>
+      Number(b.last_sync_at || 0) - Number(a.last_sync_at || 0)
+    )[0] ?? null;
+  });
+  const headerTone = $derived.by(() => {
+    if (!status) return lastError ? "danger" : "connecting";
+    if (!headerAccount) return "connecting";
+    const live = liveByAccount[headerAccount.account];
+    if (live && usageCheckedTimestamp > Number(headerAccount.last_sync_at || 0) * 1000) {
+      if (live.ok === true) return "healthy";
+      if (live.ok === false) {
+        const detail = String(live.error || "").toLowerCase();
+        return /429|rate|limit|quota|timeout/.test(detail) ? "warning" : "danger";
+      }
+    }
+    if (headerAccount.state === "ready") return "healthy";
+    if (["expiring", "warning"].includes(headerAccount.state)) return "warning";
+    if (["expired", "revoked", "invalid_capture"].includes(headerAccount.state)) return "danger";
+    return "connecting";
+  });
+  const headerAccountLabel = $derived(
+    headerTone === "healthy" ? "CUENTA DISPONIBLE" :
+      headerTone === "warning" ? "REQUIERE ATENCIÓN" :
+      headerTone === "danger" ? "CUENTA NO DISPONIBLE" : "CONECTANDO",
+  );
   const systemLabel = $derived(
     systemState === "online"
       ? "ONLINE"
@@ -917,8 +944,8 @@
     window.addEventListener("chatgpt-console-toast", onToast);
     window.addEventListener("keydown", onKeyDown);
     const extensionPoll = window.setInterval(() => {
-      if (page === "accounts") void loadExtension().catch(() => {});
-    }, 5000);
+      void loadExtension().catch(() => {});
+    }, 10000);
     void refreshAll();
     return () => {
       window.clearInterval(extensionPoll);
@@ -1051,22 +1078,10 @@
   async function loadAccounts() {
     const payload = await apiFetch("/chatgpt/admin/accounts");
     accounts = payload.accounts ?? [];
-    if (!extensionPairAccount && accounts.length) extensionPairAccount = accounts[0].account;
   }
 
   async function loadExtension() {
     extensionStatus = await apiFetch("/chatgpt/admin/extension");
-  }
-
-  async function approveExtension(requestId: string) {
-    await runTask("extension-approve", async () => {
-      await apiFetch("/chatgpt/admin/extension/approve", {
-        method: "POST",
-        body: JSON.stringify({ request_id: requestId, account: extensionPairAccount }),
-      });
-      await loadExtension();
-      showToast("Chrome extension paired");
-    });
   }
 
   async function revokeExtension(clientId: string) {
@@ -1146,6 +1161,7 @@
     const payload = await apiFetch("/chatgpt/usage");
     usage = payload;
     usageCheckedAt = new Date().toLocaleTimeString();
+    usageCheckedTimestamp = Date.now();
     const next = { ...liveByAccount };
     for (const item of payload.accounts ?? []) {
       next[item.account] = item;
@@ -3089,7 +3105,7 @@
 </script>
 
 <div class="console-shell text-slate-100">
-  <header class="console-topbar">
+  <header class={`console-topbar account-${headerTone}`}>
     <div class="console-brand">
       <div class="brand-mark">WB</div>
       <div class="min-w-0">
@@ -3098,20 +3114,16 @@
       </div>
     </div>
 
-    <div class="api-command">
-      <span
-        class={`api-signal ${
-          status ? "is-online" : lastError ? "is-error" : "is-waiting"
-        }`}
-      ></span>
+    <div class={`api-command account-${headerTone}`}>
+      <span class={`api-signal account-${headerTone}`}></span>
       <div class="min-w-0">
         <div class="api-label">
-          <strong>{systemLabel}</strong>
-          <span>{String(routing.account_strategy ?? serverStrategy)}</span>
+          <strong>{headerAccountLabel}</strong>
+          <span>{headerAccount?.account || "Esperando cuenta"}</span>
         </div>
         <div class="api-meta">
           <code>{lastError || baseUrl}</code>
-          <code>{apiKey || DEFAULT_API_KEY}</code>
+          <code>{headerAccount?.token_expires_at ? `Token: ${new Date(headerAccount.token_expires_at).toLocaleDateString()}` : "Estado de sesión"}</code>
         </div>
       </div>
     </div>
@@ -3586,19 +3598,10 @@
             <button class="rounded-2xl border border-white/10 px-3 py-2 text-sm" onclick={loadExtension}>Actualizar</button>
           </div>
           <p class="mt-2 text-sm text-slate-400">
-            Instala la extensión desde <code>extensions/chrome-bridge</code>, inicia sesión en ChatGPT en Chrome
-            y pulsa «Detectar y conectar». Compara el código y la huella antes de aprobar.
+            La extensión vincula automáticamente la sesión de Chrome a una cuenta ya registrada.
+            Abre ChatGPT en Chrome y pulsa «Conectar ahora» en el conector; no hace falta aprobar aquí.
           </p>
-          <p class="mt-2 break-all font-mono text-xs text-slate-400">Huella: {extensionStatus.fingerprint || "-"}</p>
-          {#each extensionStatus.pending ?? [] as pending (pending.request_id)}
-            <div class="mt-3 flex flex-wrap items-center gap-3 rounded-2xl border border-amber-300/30 bg-amber-300/5 p-3">
-              <strong>{pending.client_name}: {pending.code}</strong>
-              <select class="rounded-xl border border-white/10 bg-slate-950 px-3 py-2" bind:value={extensionPairAccount}>
-                {#each accountNames as name (name)}<option value={name}>{name}</option>{/each}
-              </select>
-              <button class="rounded-xl bg-sky-300 px-3 py-2 font-bold text-slate-950" onclick={() => approveExtension(pending.request_id)} disabled={!extensionPairAccount}>Aprobar</button>
-            </div>
-          {/each}
+          <p class="mt-2 break-all font-mono text-xs text-slate-400">Identidad del bridge: {extensionStatus.fingerprint || "-"}</p>
           {#each extensionStatus.clients ?? [] as client (client.client_id)}
             <div class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/10 p-3 text-sm">
               <span>{client.client_name} → <strong>{client.account}</strong> · Última renovación: {client.last_sync_at ? new Date(client.last_sync_at * 1000).toLocaleString() : "pendiente"}</span>

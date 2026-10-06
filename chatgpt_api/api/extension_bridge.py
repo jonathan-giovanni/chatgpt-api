@@ -1,9 +1,4 @@
-"""Pair a normal Chrome profile with the local bridge without exposing API keys.
-
-Only the dashboard can approve a pairing. Session material is encrypted in the
-extension before it crosses the network and is written to the existing encrypted
-account capture after its identity has been checked.
-"""
+"""Encrypted Chrome session handoff for an existing, identity-matched account."""
 
 from __future__ import annotations
 
@@ -15,7 +10,6 @@ import re
 import secrets
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,27 +21,14 @@ from cryptography.exceptions import InvalidTag
 
 from chatgpt_api.api.admin_store import BridgeAdminStore
 from chatgpt_api.providers.chatgpt.account_info import detect_account_info
-from chatgpt_api.providers.chatgpt.accounts import resolve_account_capture_path
+from chatgpt_api.providers.chatgpt.accounts import list_account_profiles, resolve_account_capture_path
 from chatgpt_api.providers.chatgpt.crypto import encrypt_text, load_secrets_key
 from chatgpt_api.providers.chatgpt.request_capture import CapturedRequest
 
 
 _LOCK = threading.RLock()
-_PENDING: dict[str, "PendingPair"] = {}
 _KEYS: dict[str, rsa.RSAPrivateKey] = {}
-_PAIR_TTL = 600
 _CLIENTS_KEY = "chrome_extension_clients"
-
-
-@dataclass
-class PendingPair:
-    client_id: str
-    client_name: str
-    public_key: rsa.RSAPublicKey
-    code: str
-    expires_at: float
-    encrypted_token: str | None = None
-    account: str | None = None
 
 
 def _b64(value: bytes) -> str:
@@ -108,81 +89,9 @@ def discovery(accounts_dir: Path) -> dict[str, Any]:
     }
 
 
-def request_pair(body: dict[str, Any]) -> dict[str, Any]:
-    client_id = str(body.get("client_id") or "")
-    if not re.fullmatch(r"[a-f0-9-]{36}", client_id):
-        raise ValueError("invalid client id")
-    public = serialization.load_der_public_key(_decode(body.get("public_key"), limit=1024))
-    if not isinstance(public, rsa.RSAPublicKey) or public.key_size < 2048:
-        raise ValueError("invalid extension public key")
-    name = str(body.get("client_name") or "Chrome")[:80]
-    request_id = secrets.token_urlsafe(24)
-    code = f"{secrets.randbelow(1000000):06d}"
-    with _LOCK:
-        _prune_pending()
-        if len(_PENDING) >= 20:
-            raise ValueError("too many pending extension pairings")
-        _PENDING[request_id] = PendingPair(client_id, name, public, code, time.time() + _PAIR_TTL)
-    return {"request_id": request_id, "code": code, "expires_in": _PAIR_TTL}
-
-
-def _prune_pending() -> None:
-    now = time.time()
-    for request_id, pending in list(_PENDING.items()):
-        if pending.expires_at <= now:
-            del _PENDING[request_id]
-
-
-def pending_pairs() -> list[dict[str, Any]]:
-    with _LOCK:
-        _prune_pending()
-        return [
-            {"request_id": request_id, "code": item.code, "client_name": item.client_name,
-             "expires_at": datetime.fromtimestamp(item.expires_at, timezone.utc).isoformat()}
-            for request_id, item in _PENDING.items() if item.encrypted_token is None
-        ]
-
-
 def _clients(store: BridgeAdminStore) -> dict[str, Any]:
     value = store.get_setting(_CLIENTS_KEY, {})
     return value if isinstance(value, dict) else {}
-
-
-def approve_pair(store: BridgeAdminStore, request_id: str, account: str, known_accounts: list[str]) -> dict[str, Any]:
-    if account not in known_accounts:
-        raise ValueError("select an existing account")
-    with _LOCK:
-        _prune_pending()
-        item = _PENDING.get(request_id)
-        if item is None or item.encrypted_token is not None:
-            raise ValueError("pairing request expired or already approved")
-        token = secrets.token_urlsafe(48)
-        encrypted = item.public_key.encrypt(token.encode(), padding.OAEP(
-            mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None
-        ))
-        clients = _clients(store)
-        clients[item.client_id] = {
-            "token_hash": hashlib.sha256(token.encode()).hexdigest(),
-            "account": account,
-            "client_name": item.client_name,
-            "paired_at": time.time(),
-            "last_sync_at": None,
-        }
-        store.set_setting(_CLIENTS_KEY, clients)
-        item.encrypted_token = _b64(encrypted)
-        item.account = account
-    return {"approved": True, "account": account}
-
-
-def pair_status(request_id: str) -> tuple[int, dict[str, Any]]:
-    with _LOCK:
-        _prune_pending()
-        item = _PENDING.get(request_id)
-        if item is None:
-            return 404, {"state": "expired"}
-        if item.encrypted_token:
-            return 200, {"state": "approved", "encrypted_token": item.encrypted_token, "account": item.account}
-        return 200, {"state": "pending"}
 
 
 def _open_envelope(accounts_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
@@ -226,7 +135,9 @@ def client_health(accounts_dir: Path, store: BridgeAdminStore, body: dict[str, A
     seconds = None
     if expires:
         seconds = int(datetime.fromisoformat(expires).timestamp() - time.time())
-    state = "expired" if seconds is not None and seconds <= 0 else "expiring" if seconds is not None and seconds < 4 * 86400 else "ok" if seconds is not None else "unknown"
+    state = "expired" if seconds is not None and seconds <= 0 else "expiring" if seconds is not None and seconds < 2 * 86400 else "ok" if seconds is not None else "unknown"
+    if client.get("last_error") in {"needs_login", "invalid_session"}:
+        state = "revoked"
     return {"account": account, "state": state, "token_expires_at": expires,
             "seconds_remaining": seconds, "last_sync_at": client.get("last_sync_at")}
 
@@ -234,6 +145,13 @@ def client_health(accounts_dir: Path, store: BridgeAdminStore, body: dict[str, A
 def sync_session(accounts_dir: Path, store: BridgeAdminStore, body: dict[str, Any]) -> dict[str, Any]:
     value = _open_envelope(accounts_dir, body)
     client_id, client = _authenticated_client(store, value)
+    return _sync_session_value(accounts_dir, store, client_id, client, value)
+
+
+def _sync_session_value(
+    accounts_dir: Path, store: BridgeAdminStore, client_id: str,
+    client: dict[str, Any], value: dict[str, Any],
+) -> dict[str, Any]:
     account = str(client["account"])
     access_token = str(value.get("access_token") or "")
     cookies = value.get("cookies")
@@ -295,14 +213,128 @@ def sync_session(accounts_dir: Path, store: BridgeAdminStore, body: dict[str, An
         clients = _clients(store)
         if client_id in clients:
             clients[client_id]["last_sync_at"] = time.time()
+            clients[client_id]["last_error"] = None
             store.set_setting(_CLIENTS_KEY, clients)
     return {"ok": True, "account": account, "token_expires_at": new_info.token_expires_at}
+
+
+def _identity_matches(old: Any, new: Any) -> int:
+    """Return a match score; conflicting claims never select an account."""
+    score = 0
+    for field in ("user_id", "account_id", "email"):
+        before = getattr(old, field)
+        after = getattr(new, field)
+        if before and after:
+            if str(before).lower() != str(after).lower():
+                return -1
+            score += 1
+    return score
+
+
+def _verify_browser_session(value: dict[str, Any]) -> str:
+    """Confirm the browser cookies with ChatGPT before granting bridge access."""
+    from curl_cffi import requests
+
+    cookie_parts = value.get("cookies")
+    if not isinstance(cookie_parts, list):
+        raise ValueError("ChatGPT cookies are missing")
+    cookie = "; ".join(
+        f"{item.get('name')}={item.get('value')}" for item in cookie_parts
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and isinstance(item.get("value"), str)
+    )
+    try:
+        response = requests.get(
+            "https://chatgpt.com/api/auth/session",
+            headers={"cookie": cookie, "accept": "application/json"},
+            impersonate="chrome", timeout=12, allow_redirects=False,
+        )
+        session = response.json() if response.status_code == 200 else {}
+    except Exception as exc:
+        raise ValueError("ChatGPT session could not be verified") from exc
+    verified_token = session.get("accessToken") if isinstance(session, dict) else None
+    if not isinstance(verified_token, str) or not verified_token:
+        raise ValueError("ChatGPT did not confirm the browser session")
+    return verified_token
+
+
+def activate_session(
+    accounts_dir: Path, store: BridgeAdminStore, body: dict[str, Any],
+) -> dict[str, Any]:
+    """Pair inside the extension when its live session matches one saved capture."""
+    value = _open_envelope(accounts_dir, body)
+    client_id = str(value.get("client_id") or "")
+    if not re.fullmatch(r"[a-f0-9-]{36}", client_id):
+        raise ValueError("invalid client id")
+    public = serialization.load_der_public_key(_decode(value.get("client_public_key"), limit=1024))
+    if not isinstance(public, rsa.RSAPublicKey) or public.key_size < 2048:
+        raise ValueError("invalid extension public key")
+    access_token = str(value.get("access_token") or "")
+    if len(access_token) > 16000 or not re.fullmatch(r"[^\s.]+\.[^\s.]+\.[^\s.]+", access_token):
+        raise ValueError("ChatGPT session has no usable access token")
+    new_info = detect_account_info(CapturedRequest(headers={"authorization": f"Bearer {access_token}"}))
+    verified_token = _verify_browser_session(value)
+    verified_info = detect_account_info(CapturedRequest(headers={"authorization": f"Bearer {verified_token}"}))
+    if _identity_matches(new_info, verified_info) < 1:
+        raise ValueError("ChatGPT session identity does not match the browser token")
+    if not verified_info.token_expires_at or datetime.fromisoformat(verified_info.token_expires_at).timestamp() <= time.time() + 60:
+        raise ValueError("ChatGPT access token is expired")
+    browser_email = str(value.get("email") or "").strip().lower()
+    if browser_email and verified_info.email and browser_email != verified_info.email.lower():
+        raise ValueError("ChatGPT browser email does not match the access token")
+    matches: list[tuple[int, str]] = []
+    for profile in list_account_profiles(accounts_dir):
+        if not profile.exists:
+            continue
+        try:
+            old_info = detect_account_info(CapturedRequest.from_file(profile.capture_path))
+        except (OSError, ValueError):
+            continue
+        score = _identity_matches(old_info, verified_info)
+        if score >= 1:
+            matches.append((score, profile.name))
+    if not matches:
+        raise ValueError("This Chrome session does not match a registered bridge account")
+    matches.sort(reverse=True)
+    if len(matches) > 1 and matches[0][0] == matches[1][0]:
+        raise ValueError("More than one registered account matches this Chrome session")
+    value["access_token"] = verified_token
+    account = matches[0][1]
+    token = secrets.token_urlsafe(48)
+    client = {
+        "token_hash": hashlib.sha256(token.encode()).hexdigest(),
+        "account": account,
+        "client_name": "Chrome",
+        "paired_at": time.time(),
+        "last_sync_at": None,
+    }
+    with _LOCK:
+        clients = _clients(store)
+        prior = clients.get(client_id)
+        clients[client_id] = client
+        store.set_setting(_CLIENTS_KEY, clients)
+    try:
+        synced = _sync_session_value(accounts_dir, store, client_id, client, value)
+    except Exception:
+        with _LOCK:
+            clients = _clients(store)
+            if prior is None:
+                clients.pop(client_id, None)
+            else:
+                clients[client_id] = prior
+            store.set_setting(_CLIENTS_KEY, clients)
+        raise
+    encrypted = public.encrypt(token.encode(), padding.OAEP(
+        mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None
+    ))
+    return {"account": account, "encrypted_token": _b64(encrypted),
+            "token_expires_at": synced["token_expires_at"]}
 
 
 def list_clients(store: BridgeAdminStore) -> list[dict[str, Any]]:
     return [
         {"client_id": client_id, "account": value.get("account"), "client_name": value.get("client_name"),
-         "paired_at": value.get("paired_at"), "last_sync_at": value.get("last_sync_at")}
+         "paired_at": value.get("paired_at"), "last_sync_at": value.get("last_sync_at"),
+         "last_error": value.get("last_error")}
         for client_id, value in _clients(store).items()
     ]
 
@@ -313,3 +345,44 @@ def revoke_client(store: BridgeAdminStore, client_id: str) -> bool:
         removed = clients.pop(client_id, None) is not None
         store.set_setting(_CLIENTS_KEY, clients)
         return removed
+
+
+def report_client_state(accounts_dir: Path, store: BridgeAdminStore, body: dict[str, Any]) -> dict[str, Any]:
+    value = _open_envelope(accounts_dir, body)
+    client_id, _ = _authenticated_client(store, value)
+    state = str(value.get("state") or "")
+    if state not in {"needs_login", "invalid_session", "network_error", "ok"}:
+        raise ValueError("invalid extension state")
+    with _LOCK:
+        clients = _clients(store)
+        clients[client_id]["last_error"] = None if state == "ok" else state
+        store.set_setting(_CLIENTS_KEY, clients)
+    return {"ok": True}
+
+
+def account_statuses(accounts_dir: Path, store: BridgeAdminStore) -> list[dict[str, Any]]:
+    latest_client: dict[str, dict[str, Any]] = {}
+    for client in _clients(store).values():
+        account = str(client.get("account") or "")
+        if account and float(client.get("paired_at") or 0) >= float(latest_client.get(account, {}).get("paired_at") or 0):
+            latest_client[account] = client
+    result = []
+    for profile in list_account_profiles(accounts_dir):
+        if not profile.exists:
+            continue
+        try:
+            info = detect_account_info(CapturedRequest.from_file(profile.capture_path))
+            expires = info.token_expires_at
+            seconds = int(datetime.fromisoformat(expires).timestamp() - time.time()) if expires else None
+            state = "expired" if seconds is not None and seconds <= 0 else "expiring" if seconds is not None and seconds < 2 * 86400 else "ready" if seconds is not None else "unknown"
+        except (OSError, ValueError):
+            expires, seconds, state = None, None, "invalid_capture"
+        client = latest_client.get(profile.name, {})
+        if client.get("last_error") in {"needs_login", "invalid_session"}:
+            state = "revoked"
+        elif client.get("last_error") == "network_error" and state == "ready":
+            state = "warning"
+        result.append({"account": profile.name, "state": state,
+                       "token_expires_at": expires, "seconds_remaining": seconds,
+                       "last_sync_at": client.get("last_sync_at")})
+    return result

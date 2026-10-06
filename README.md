@@ -125,7 +125,7 @@ downloads, and developer tooling.
 
 Recent project updates include:
 
-- **Chrome account connector:** a Manifest V3 extension checks localhost before an optional LAN IP, pairs with an existing account through Accounts, and refreshes the encrypted capture from a normal Chrome ChatGPT session. The dashboard shows pending pairings and revocation. See [Chrome connector](docs/CHROME_EXTENSION.md) for setup and limits.
+- **Chrome account connector:** a Manifest V3 extension checks localhost before an optional LAN IP, automatically links a matching existing account from a normal Chrome ChatGPT session, and refreshes its encrypted capture. Its pulse icon shows health and toggles automatic renewal two days before expiry; the dashboard header reflects account status. See [Chrome connector](docs/CHROME_EXTENSION.md) for setup and limits.
 
 - **Model discovery and Project routing:** modernizes model metadata and lets new chats target an optional ChatGPT Project.
 - **Text and audio attachments:** accepts bounded text-file and WAV/MP3 attachments in ordinary chats, including existing conversations. Audio files sent this way are generic attachments and do not guarantee transcription.

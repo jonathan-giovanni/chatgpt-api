@@ -74,55 +74,57 @@ export async function keyPair() {
   return keys;
 }
 
-export async function beginPair(found) {
-  const keys = await keyPair();
-  const saved = await chrome.storage.local.get("clientId");
-  const clientId = saved.clientId || crypto.randomUUID();
-  await chrome.storage.local.set({ clientId });
-  const publicKey = bytes64(new Uint8Array(await crypto.subtle.exportKey("spki", keys.publicKey)));
-  const pair = await json(found.base, "pair", {
-    method: "POST", body: JSON.stringify({ client_id: clientId, public_key: publicKey, client_name: "Chrome" }),
-  });
-  await chrome.storage.local.set({
-    bridgeBase: found.base, bridgeFingerprint: found.fingerprint,
-    pairRequestId: pair.request_id, pairCode: pair.code, pairStartedAt: Date.now(),
-  });
-  return pair;
-}
-
-export async function finishPair() {
-  const state = await chrome.storage.local.get(["bridgeBase", "pairRequestId", "bridgeFingerprint"]);
-  if (!state.bridgeBase || !state.pairRequestId) throw new Error("No hay emparejamiento pendiente.");
-  const found = await json(state.bridgeBase, "discover");
-  if (found.fingerprint !== state.bridgeFingerprint) throw new Error("La identidad del bridge cambió. Revisa la IP.");
-  const result = await json(state.bridgeBase, `pair/status?request_id=${encodeURIComponent(state.pairRequestId)}`);
-  if (result.state !== "approved") return result;
-  const keys = await keyPair();
-  const tokenBytes = await crypto.subtle.decrypt({ name: "RSA-OAEP" }, keys.privateKey, from64(result.encrypted_token));
-  await chrome.storage.local.set({ bridgeToken: dec.decode(tokenBytes), bridgeAccount: result.account });
-  await chrome.storage.local.remove(["pairRequestId", "pairCode", "pairStartedAt"]);
-  return result;
-}
-
 export async function envelope(value) {
   const state = await chrome.storage.local.get(["bridgeBase", "bridgeFingerprint", "bridgeToken", "clientId"]);
-  if (!state.bridgeToken) throw new Error("Aprueba primero la extensión en Accounts.");
+  if (!state.bridgeToken) throw new Error("Conecta primero tu sesión de Chrome.");
   const found = await json(state.bridgeBase, "discover");
   if (found.fingerprint !== state.bridgeFingerprint) throw new Error("La identidad del bridge cambió. Se bloqueó el envío.");
+  return seal({ ...found, base: state.bridgeBase }, {
+    ...value, token: state.bridgeToken, client_id: state.clientId,
+  });
+}
+
+export async function seal(found, value) {
   const serverKey = await crypto.subtle.importKey("spki", from64(found.public_key),
     { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]);
   const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv: nonce, additionalData: enc.encode("chatgpt-bridge-extension-v1") },
-    aes, enc.encode(JSON.stringify({ ...value, token: state.bridgeToken, client_id: state.clientId })));
+    aes, enc.encode(JSON.stringify(value)));
   const rawKey = await crypto.subtle.exportKey("raw", aes);
   const encryptedKey = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, serverKey, rawKey);
-  return { base: state.bridgeBase, body: {
+  return { base: found.base, body: {
     key: bytes64(new Uint8Array(encryptedKey)),
     nonce: bytes64(nonce),
     ciphertext: bytes64(new Uint8Array(ciphertext)),
   } };
+}
+
+export async function activate(found) {
+  const saved = await chrome.storage.local.get(["clientId", "bridgeFingerprint"]);
+  if (saved.bridgeFingerprint && saved.bridgeFingerprint !== found.fingerprint) {
+    throw new Error("La identidad del bridge cambió. Se bloqueó la conexión.");
+  }
+  const keys = await keyPair();
+  const clientId = saved.clientId || crypto.randomUUID();
+  const session = await readChatgptSession();
+  const clientPublicKey = bytes64(new Uint8Array(await crypto.subtle.exportKey("spki", keys.publicKey)));
+  const sealed = await seal(found, {
+    ...session, client_id: clientId, client_public_key: clientPublicKey,
+  });
+  const result = await json(found.base, "activate", {
+    method: "POST", body: JSON.stringify(sealed.body),
+  });
+  const tokenBytes = await crypto.subtle.decrypt(
+    { name: "RSA-OAEP" }, keys.privateKey, from64(result.encrypted_token));
+  await chrome.storage.local.set({
+    clientId, bridgeBase: found.base, bridgeFingerprint: found.fingerprint,
+    bridgeToken: dec.decode(tokenBytes), bridgeAccount: result.account,
+    lastSyncAt: Date.now(), lastError: "", health: "ok",
+  });
+  await chrome.storage.local.remove(["pairRequestId", "pairCode", "pairStartedAt"]);
+  return result;
 }
 
 export async function securePost(path, value = {}) {
@@ -156,9 +158,12 @@ export async function readChatgptSession() {
   return { access_token: session.accessToken, email: session.email, cookies };
 }
 
-export async function syncOnce() {
+export async function syncOnce({ automatic = false } = {}) {
   const session = await readChatgptSession();
   const result = await securePost("sync", session);
-  await chrome.storage.local.set({ lastSyncAt: Date.now(), lastError: "", health: "ok" });
+  await chrome.storage.local.set({
+    lastSyncAt: Date.now(), lastError: "", health: "ok",
+    ...(automatic ? { lastAutomaticRenewal: Date.now() } : {}),
+  });
   return result;
 }

@@ -1218,10 +1218,6 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             if path == "/v1/chatgpt/extension/discover":
                 _send_json(self, 200, extension_bridge.discovery(config.accounts_dir or accounts_dir_from_env()))
                 return
-            if path == "/v1/chatgpt/extension/pair/status":
-                status, payload = extension_bridge.pair_status((query.get("request_id") or [""])[-1])
-                _send_json(self, status, payload)
-                return
             if not _authorize(self, config.api_key):
                 return
             if path == "/health":
@@ -1276,8 +1272,10 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
                 return
             if path == "/v1/chatgpt/admin/extension":
                 _send_json(self, 200, {
-                    "pending": extension_bridge.pending_pairs(),
                     "clients": extension_bridge.list_clients(_admin_store(config)),
+                    "accounts": extension_bridge.account_statuses(
+                        config.accounts_dir or accounts_dir_from_env(), _admin_store(config)
+                    ),
                     "fingerprint": extension_bridge.discovery(config.accounts_dir or accounts_dir_from_env())["fingerprint"],
                 })
                 return
@@ -1302,16 +1300,22 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
-            if path in {"/v1/chatgpt/extension/pair", "/v1/chatgpt/extension/health", "/v1/chatgpt/extension/sync"}:
+            if path in {"/v1/chatgpt/extension/activate", "/v1/chatgpt/extension/health", "/v1/chatgpt/extension/sync", "/v1/chatgpt/extension/report"}:
                 try:
                     length = int(self.headers.get("content-length", "0") or "0")
                     if not 0 < length <= 180000:
                         raise ValueError("extension request is too large")
                     body = _read_json_body(self)
-                    if path.endswith("/pair"):
-                        result = extension_bridge.request_pair(body)
+                    if path.endswith("/activate"):
+                        result = extension_bridge.activate_session(
+                            config.accounts_dir or accounts_dir_from_env(), _admin_store(config), body,
+                        )
                     elif path.endswith("/health"):
                         result = extension_bridge.client_health(
+                            config.accounts_dir or accounts_dir_from_env(), _admin_store(config), body
+                        )
+                    elif path.endswith("/report"):
+                        result = extension_bridge.report_client_state(
                             config.accounts_dir or accounts_dir_from_env(), _admin_store(config), body
                         )
                     else:
@@ -3127,13 +3131,6 @@ async def _admin_post_response(
     path: str,
     body: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
-    if path == "/v1/chatgpt/admin/extension/approve":
-        return 200, extension_bridge.approve_pair(
-            _admin_store(config), str(body.get("request_id") or ""),
-            _safe_account_name(str(body.get("account") or "")),
-            [name for name in _known_admin_account_names(config, router)
-             if resolve_account_capture_path(name, config.accounts_dir).is_file()],
-        )
     if path == "/v1/chatgpt/admin/extension/revoke":
         return 200, {"revoked": extension_bridge.revoke_client(
             _admin_store(config), str(body.get("client_id") or "")

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Bridge Connector",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Renueva la cuenta vinculada al bridge desde tu sesión normal de Chrome.",
   "minimum_chrome_version": "116",
   "permissions": ["alarms", "cookies", "scripting", "storage", "tabs"],
@@ -11,6 +11,12 @@
     "http://localhost/*"
   ],
   "optional_host_permissions": ["http://*/*"],
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_popup": "popup.html", "default_title": "ChatGPT Bridge" }
 }
