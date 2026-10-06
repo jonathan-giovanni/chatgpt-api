@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>ChatGPT Bridge</title>
+    <style>
+      body{font:14px system-ui,sans-serif;width:330px;margin:0;padding:18px;background:#0f172a;color:#f8fafc}
+      h1{font-size:17px;margin:0 0 10px}p{line-height:1.4;color:#cbd5e1}input{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #475569;background:#1e293b;color:#fff}
+      button{background:#38bdf8;color:#082f49;border:0;border-radius:8px;padding:9px 12px;font-weight:700;cursor:pointer;margin:8px 7px 0 0}button.secondary{background:#334155;color:#fff}
+      #status{white-space:pre-wrap;word-break:break-word;border:1px solid #334155;border-radius:8px;padding:10px;margin-top:12px;min-height:44px}
+      small{color:#94a3b8}code{color:#7dd3fc} .error{color:#fda4af}.ok{color:#86efac}
+    </style>
+  </head>
+  <body>
+    <h1>ChatGPT Bridge Connector</h1>
+    <p>Busca el bridge en este ordenador. Si está en la LAN, escribe solo su IP.</p>
+    <input id="ip" aria-label="IP del bridge" placeholder="Automático: localhost">
+    <button id="connect">Detectar y conectar</button>
+    <button id="refresh" class="secondary">Renovar ahora</button>
+    <div id="status" role="status"></div>
+    <small>Aprueba el código en Bridge Console → Accounts. Compara también la huella del servidor.</small>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

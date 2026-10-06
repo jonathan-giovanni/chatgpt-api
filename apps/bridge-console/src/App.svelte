@@ -701,6 +701,8 @@
   let apiKey = $state(DEFAULT_API_KEY);
 
   let captureAccount = $state("main-free");
+  let extensionStatus = $state<Json>({ pending: [], clients: [], fingerprint: "" });
+  let extensionPairAccount = $state("");
   let captureText = $state("");
   let captureResult = $state<Json | null>(null);
   let captureModalOpen = $state(false);
@@ -914,8 +916,12 @@
     window.addEventListener("hashchange", onHashChange);
     window.addEventListener("chatgpt-console-toast", onToast);
     window.addEventListener("keydown", onKeyDown);
+    const extensionPoll = window.setInterval(() => {
+      if (page === "accounts") void loadExtension().catch(() => {});
+    }, 5000);
     void refreshAll();
     return () => {
+      window.clearInterval(extensionPoll);
       window.removeEventListener("hashchange", onHashChange);
       window.removeEventListener("chatgpt-console-toast", onToast);
       window.removeEventListener("keydown", onKeyDown);
@@ -973,6 +979,7 @@
         loadArtifacts(),
         loadModels(),
         loadProjects(),
+        loadExtension(),
       ]);
     });
     void loadUsage().catch((error) => {
@@ -1044,6 +1051,33 @@
   async function loadAccounts() {
     const payload = await apiFetch("/chatgpt/admin/accounts");
     accounts = payload.accounts ?? [];
+    if (!extensionPairAccount && accounts.length) extensionPairAccount = accounts[0].account;
+  }
+
+  async function loadExtension() {
+    extensionStatus = await apiFetch("/chatgpt/admin/extension");
+  }
+
+  async function approveExtension(requestId: string) {
+    await runTask("extension-approve", async () => {
+      await apiFetch("/chatgpt/admin/extension/approve", {
+        method: "POST",
+        body: JSON.stringify({ request_id: requestId, account: extensionPairAccount }),
+      });
+      await loadExtension();
+      showToast("Chrome extension paired");
+    });
+  }
+
+  async function revokeExtension(clientId: string) {
+    await runTask("extension-revoke", async () => {
+      await apiFetch("/chatgpt/admin/extension/revoke", {
+        method: "POST",
+        body: JSON.stringify({ client_id: clientId }),
+      });
+      await loadExtension();
+      showToast("Chrome extension revoked");
+    });
   }
 
   async function loadProjects() {
@@ -3546,6 +3580,32 @@
         </section>
 
       {:else if page === "accounts"}
+        <section class="mb-4 rounded-[2rem] border border-sky-300/20 bg-slate-900/80 p-5">
+          <div class="flex items-center justify-between gap-3">
+            <PanelTitle kicker="chrome" title="Conector de cuenta" />
+            <button class="rounded-2xl border border-white/10 px-3 py-2 text-sm" onclick={loadExtension}>Actualizar</button>
+          </div>
+          <p class="mt-2 text-sm text-slate-400">
+            Instala la extensión desde <code>extensions/chrome-bridge</code>, inicia sesión en ChatGPT en Chrome
+            y pulsa «Detectar y conectar». Compara el código y la huella antes de aprobar.
+          </p>
+          <p class="mt-2 break-all font-mono text-xs text-slate-400">Huella: {extensionStatus.fingerprint || "-"}</p>
+          {#each extensionStatus.pending ?? [] as pending (pending.request_id)}
+            <div class="mt-3 flex flex-wrap items-center gap-3 rounded-2xl border border-amber-300/30 bg-amber-300/5 p-3">
+              <strong>{pending.client_name}: {pending.code}</strong>
+              <select class="rounded-xl border border-white/10 bg-slate-950 px-3 py-2" bind:value={extensionPairAccount}>
+                {#each accountNames as name (name)}<option value={name}>{name}</option>{/each}
+              </select>
+              <button class="rounded-xl bg-sky-300 px-3 py-2 font-bold text-slate-950" onclick={() => approveExtension(pending.request_id)} disabled={!extensionPairAccount}>Aprobar</button>
+            </div>
+          {/each}
+          {#each extensionStatus.clients ?? [] as client (client.client_id)}
+            <div class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/10 p-3 text-sm">
+              <span>{client.client_name} → <strong>{client.account}</strong> · Última renovación: {client.last_sync_at ? new Date(client.last_sync_at * 1000).toLocaleString() : "pendiente"}</span>
+              <button class="rounded-xl border border-rose-300/40 px-3 py-2 text-rose-200" onclick={() => revokeExtension(client.client_id)}>Revocar</button>
+            </div>
+          {/each}
+        </section>
         <section class="grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_420px]">
           <article
             class="rounded-[2rem] border border-white/10 bg-slate-900/80 p-5"

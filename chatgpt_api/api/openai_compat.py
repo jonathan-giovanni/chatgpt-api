@@ -22,6 +22,7 @@ from chatgpt_api.api.admin_store import BridgeAdminStore
 from chatgpt_api.api.config import OpenAICompatConfig
 from chatgpt_api.api.conversation_stream import ConversationStreams, decode_voice_batch
 from chatgpt_api.api.file_inputs import file_content_part, validate_file_parts
+from chatgpt_api.api import extension_bridge
 from chatgpt_api.api.http_utils import (
     authorize as _authorize,
     cancel_operation_id_from_path as _cancel_operation_id_from_path,
@@ -1214,6 +1215,13 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
                     },
                 )
                 return
+            if path == "/v1/chatgpt/extension/discover":
+                _send_json(self, 200, extension_bridge.discovery(config.accounts_dir or accounts_dir_from_env()))
+                return
+            if path == "/v1/chatgpt/extension/pair/status":
+                status, payload = extension_bridge.pair_status((query.get("request_id") or [""])[-1])
+                _send_json(self, status, payload)
+                return
             if not _authorize(self, config.api_key):
                 return
             if path == "/health":
@@ -1266,6 +1274,13 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             if path == "/v1/chatgpt/admin/accounts":
                 _send_json(self, 200, _admin_accounts_response(config, router))
                 return
+            if path == "/v1/chatgpt/admin/extension":
+                _send_json(self, 200, {
+                    "pending": extension_bridge.pending_pairs(),
+                    "clients": extension_bridge.list_clients(_admin_store(config)),
+                    "fingerprint": extension_bridge.discovery(config.accounts_dir or accounts_dir_from_env())["fingerprint"],
+                })
+                return
             if path == "/v1/chatgpt/admin/artifacts":
                 _send_json(self, 200, _admin_artifacts_response(config, query))
                 return
@@ -1286,9 +1301,31 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             _send_json(self, 404, {"error": {"message": "not found", "type": "not_found"}})
 
         def do_POST(self) -> None:  # noqa: N802
+            path = urlparse(self.path).path
+            if path in {"/v1/chatgpt/extension/pair", "/v1/chatgpt/extension/health", "/v1/chatgpt/extension/sync"}:
+                try:
+                    length = int(self.headers.get("content-length", "0") or "0")
+                    if not 0 < length <= 180000:
+                        raise ValueError("extension request is too large")
+                    body = _read_json_body(self)
+                    if path.endswith("/pair"):
+                        result = extension_bridge.request_pair(body)
+                    elif path.endswith("/health"):
+                        result = extension_bridge.client_health(
+                            config.accounts_dir or accounts_dir_from_env(), _admin_store(config), body
+                        )
+                    else:
+                        result = extension_bridge.sync_session(
+                            config.accounts_dir or accounts_dir_from_env(), _admin_store(config), body
+                        )
+                    _send_json(self, 200, result)
+                except PermissionError as exc:
+                    _send_json(self, 403, {"error": {"message": str(exc), "type": "authentication_error"}})
+                except (ValueError, TypeError) as exc:
+                    _send_json(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                return
             if not _authorize(self, config.api_key):
                 return
-            path = urlparse(self.path).path
             voice_events_match = re.fullmatch(r"/v1/chatgpt/voice/sessions/(vs_[a-f0-9]{32})/events", path)
             if voice_events_match:
                 try:
@@ -3090,6 +3127,17 @@ async def _admin_post_response(
     path: str,
     body: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
+    if path == "/v1/chatgpt/admin/extension/approve":
+        return 200, extension_bridge.approve_pair(
+            _admin_store(config), str(body.get("request_id") or ""),
+            _safe_account_name(str(body.get("account") or "")),
+            [name for name in _known_admin_account_names(config, router)
+             if resolve_account_capture_path(name, config.accounts_dir).is_file()],
+        )
+    if path == "/v1/chatgpt/admin/extension/revoke":
+        return 200, {"revoked": extension_bridge.revoke_client(
+            _admin_store(config), str(body.get("client_id") or "")
+        )}
     if path == "/v1/chatgpt/admin/projects/save":
         return 200, _admin_project_save_payload(config, body)
     if path == "/v1/chatgpt/admin/projects/delete":
