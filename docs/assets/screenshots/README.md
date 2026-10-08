@@ -1,26 +1,22 @@
 # Screenshot Evidence
 
-These screenshots are captured from the Docker stack, not static mockups.
+The current Console captures come from the local Docker stack. Before
+committing them, the account header was cropped out and identifiers, expiry
+dates, Project IDs, and attachment batch IDs were replaced with examples. They
+do not show account usage, account secrets, or private session data.
 
-## Captured Views
-
-| File | Source | What it proves |
+| File | Console view | What it shows |
 | --- | --- | --- |
-| `oss-console-overview.png` | `http://127.0.0.1:8080` | Bridge Console loads from the nginx Docker image, reads API health from `:8000`, shows route capacity, model count, download routes, and operational status. |
-| `oss-console-accounts.png` | `http://127.0.0.1:8080/#accounts` | Account capture management is exposed as a first-class console page with ASCII account-name validation, capture inspection, update, verify, and delete controls. |
-| `oss-console-docs.png` | `http://127.0.0.1:8080/#api-docs` | Console embeds API route docs with request/response shape guidance, including chat, images, edits, vision/OCR, research, files, admin routes, and cancel routes. |
-| `oss-console-library.png` | `http://127.0.0.1:8080/#storage` | The storage/library plane is separated from runtime controls and is ready to show completed images and research reports with download URLs. |
-| `oss-console-opencode.png` | `http://127.0.0.1:8080/#opencode` | opencode is configured as a consumer integration, not as the whole product control plane. |
-| `oss-game-setup.png` | `http://127.0.0.1:3000` | The character-game use case loads from Docker, sees the local API as online, shows the public browser URL, and is ready to stream the first route only after user action. |
+| `console-test-lab-voice.png` | `#test-lab` | Optional Project and conversation UUID, model, local audio source, and Arbor voice in the same workflow. |
+| `console-project-routing.png` | `#projects` | Friendly Project mapping and routing; example names and a hidden Project ID. |
+| `console-sip-attachments.png` | `#test-lab` | A synthetic two-file SIP attachment batch and the generated Docker gateway command. |
+| `console-chrome-connector.png` | `#accounts` | Extension pairing status in the Console with an example account label and hidden date. |
+| `oss-game-setup.png` | Character game | Separate example client calling the local API. |
+| `character-game-redesign.png` | Character game | Example route selection and game layout. |
 
-## Re-Capture
-
-Run the stack:
-
-```sh
-docker compose up -d --build
-```
-
-Then capture with Playwright or a browser screenshot tool. Avoid committing
-screenshots that expose session cookies, copied captures, bearer tokens beyond
-the default `local-dev-key`, or personal account names you do not want shown.
+To recapture, run `docker compose up -d --build` and open the relevant local
+page. Remove account names, counts, usage, reset/expiry dates, Project IDs,
+tokens, cookies, captures, and local paths **before** adding any new image to
+Git. The API's default development key is an example only; never screenshot a
+real key. Review the resulting PNG visually, including its background and
+header, before staging it.

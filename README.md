@@ -4,9 +4,10 @@
 
 **A local API bridge for building real apps on top of ChatGPT Web accounts.**
 
-Run chat, streaming, image generation, image editing, OCR/vision, Deep Research,
-WebRTC voice, local SIP/RTP, artifact downloads, opencode integration, and a
-full-stack character game from one local stack.
+Run chat and streaming in named Projects or standalone conversations; attach
+documents, images, and audio; use WebRTC voice or local SIP/RTP with a live text
+timeline; generate images and research reports; and operate everything from one
+local API and dashboard. A Chrome connector can renew an existing linked account.
 
 <p>
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-16a34a?style=for-the-badge">
@@ -20,8 +21,12 @@ full-stack character game from one local stack.
   <a href="#quick-start-with-docker">Quick Start</a>
   · <a href="#what-this-is">What It Does</a>
   · <a href="#account-capture">Account Capture</a>
+  · <a href="#chrome-connector">Chrome Connector</a>
+  · <a href="#projects-and-conversations">Projects</a>
   · <a href="#api-overview">API Routes</a>
   · <a href="#voice-project-and-file-apis">Voice and SIP</a>
+  · <a href="#file-inputs">Files</a>
+  · <a href="#latest-validation-snapshot">Testing</a>
   · <a href="#image-generation">Images</a>
   · <a href="#deep-research">Research</a>
   · <a href="#opencode-integration">opencode</a>
@@ -31,7 +36,7 @@ full-stack character game from one local stack.
 </div>
 
 <p align="center">
-  <img alt="Bridge Console overview" src="docs/assets/screenshots/oss-console-overview.png" width="920">
+  <img alt="Bridge Console Test Lab with optional Project, conversation UUID, and WebRTC voice" src="docs/assets/screenshots/console-test-lab-voice.png" width="920">
 </p>
 
 ## The Pitch
@@ -83,19 +88,34 @@ downloads, and developer tooling.
 
 ## Screenshots
 
-| Console | Character Game |
-| --- | --- |
-| <img src="docs/assets/screenshots/oss-console-overview.png" alt="Console overview" width="440"> | <img src="docs/assets/screenshots/oss-game-setup.png" alt="Character game setup" width="440"> |
+Current Docker Console views (account identifiers, bridge identity, and expiry
+dates are redacted; the SIP files are harmless examples):
 
-| API Docs | Storage / Library |
+| Project routing | Chat and WebRTC voice |
 | --- | --- |
-| <img src="docs/assets/screenshots/oss-console-docs.png" alt="Console docs" width="440"> | <img src="docs/assets/screenshots/oss-console-library.png" alt="Console artifact library" width="440"> |
+| <img src="docs/assets/screenshots/console-project-routing.png" alt="Project mappings and account-aware routing in the Console" width="440"> | <img src="docs/assets/screenshots/console-test-lab-voice.png" alt="Test Lab with optional Project, conversation UUID, and Arbor voice" width="440"> |
+
+| SIP/RTP file preparation | Chrome account connector |
+| --- | --- |
+| <img src="docs/assets/screenshots/console-sip-attachments.png" alt="SIP gateway command after preparing two local example attachments" width="440"> | <img src="docs/assets/screenshots/console-chrome-connector.png" alt="Account connector status in the Accounts page" width="440"> |
+
+The separate [character game screenshot](docs/assets/screenshots/oss-game-setup.png)
+shows one example client. The Console captures above are cropped below the
+account health header and use example identifiers; they do not include account
+usage, expiry dates, private Project IDs, or credentials.
 
 ## Capability Snapshot
 
 | Capability | Route / surface | Current status |
 | --- | --- | --- |
 | Chat and streaming | `POST /v1/chat/completions` | implemented |
+| Optional Project and conversation UUID | `chatgpt_project`, `conversation_id`; Console Projects and Test Lab | implemented; omitted Project creates a chat outside Projects; omitted UUID starts a new conversation |
+| Mixed file attachments | chat content parts and initial voice `files` | implemented for UTF-8 text, PDF, DOCX/XLSX/PPTX, PNG/JPEG/WebP/GIF, WAV/MP3; 10 files, 20 MiB each, 25 MiB total |
+| Voice conversation text | `GET /v1/chatgpt/conversations/{uuid}/messages` and `/events` | on-demand history plus SSE updates from wrapper-owned WebRTC/SIP data channels; audio with no upstream transcript has no text |
+| WebRTC voice | `POST /v1/chatgpt/voice/sessions`; Test Lab | experimental ChatGPT Web signalling; microphone or local audio file; Arbor sends `fathom` |
+| Local SIP/RTP telephony | Docker `sip-gateway`, SIP/UDP and RTP/PCMU | experimental; one local call at a time; Project, UUID, voice, text, and staged file list on initial call |
+| SIP file staging | `POST/GET /v1/chatgpt/voice/attachments` | authenticated local batch, expires after 24 hours; gateway fetches before the first offer |
+| Chrome account connector | `extensions/chrome-bridge`, `/v1/chatgpt/extension/*` | pairs an existing account, checks health, and renews its encrypted capture from the signed-in Chrome session; installation required |
 | Tool-call bridge | `tools` through chat completions | implemented |
 | Image generation | `POST /v1/images/generations` | implemented |
 | Image edit / composite | `POST /v1/images/edits` | implemented, one output image |
@@ -103,12 +123,6 @@ downloads, and developer tooling.
 | Deep Research report export | `chatgpt-deep-research` model alias | implemented |
 | File downloads | `GET/HEAD /v1/chatgpt/files/{id}/{filename}` | implemented |
 | Account usage and limits | `GET /v1/chatgpt/usage` | implemented when ChatGPT reports data |
-| Chrome account connector | `extensions/chrome-bridge`, `/v1/chatgpt/extension/*` | local pairing and encrypted session refresh; Chrome installation required |
-| Project-aware conversation continuity | `chatgpt_project` and `conversation_id` in chat requests | implemented |
-| Conversation text timeline | `GET /v1/chatgpt/conversations/{uuid}/messages` and `/events`; Test Lab | history snapshot plus event stream; live voice text comes from the wrapper's data channel |
-| WebRTC voice with selectable ChatGPT voice | `POST /v1/chatgpt/voice/sessions` and Bridge Console Test Lab | experimental; Arbor maps to `fathom` |
-| SIP/RTP local telephony | Docker `sip-gateway`, SIP/UDP and RTP/PCMU | experimental; one loopback call at a time |
-| Text/audio file input | chat content parts; UTF-8 text, WAV, and MP3 | implemented with bounded sizes |
 | opencode consumer config | `integrations/opencode/*` | implemented |
 | Character game use case | `apps/character-game` | included as a working reference app |
 
@@ -136,88 +150,46 @@ Recent project updates include:
 
 ## Latest Validation Snapshot
 
-These checks were run locally on 2026-09-25 for Web Voice, SIP/RTP, and the
-internal voice ID correction:
+The current file/voice integration was checked on **2026-10-08** on Windows
+with the Docker API and Console running locally. A green route status means
+the bridge works locally; upstream ChatGPT behavior still depends on the
+linked account, its quota, and private Web interfaces.
 
-| Check | Result |
+| Check | Result | What it establishes |
+| --- | --- | --- |
+| Python suite | `307 passed, 1 deselected` | One existing Unix file-mode assertion was excluded on Windows; the voice, SIP, file, account, and API tests passed. |
+| Svelte diagnostics and production build | `0 errors, 0 warnings`; Vite build passed | Current Console components compile, including Project and SIP attachment controls. |
+| Docker builds and runtime | API, Console, and SIP gateway images built; API healthy; Console served on `:8080` | Local packaging and startup. |
+| Authenticated attachment staging | Mixed TXT/PDF/PNG/MP3 synthetic files staged over local HTTP and fetched from the SIP container | Batch transport, limits, and gateway retrieval. This does **not** prove that every format is processed by upstream ChatGPT in a real call. |
+| SIP request/reconnect tests | Initial offer contains files, text, Project, model, and UUID; reconnect does not replay files | Local request shape and idempotent reconnect behavior. |
+
+Earlier **live** checks remain useful but were run against previous revisions:
+
+| Date | Live evidence |
 | --- | --- |
-| Focused Python voice, SIP, and OpenAI-compatible API tests | `130 passed` |
-| Bridge Console Svelte diagnostics | `0 errors, 0 warnings` |
-| Docker API and Bridge Console production builds | both images built; API healthy and Test Lab online |
-| Voice ID mapping | Arbor is displayed while WebRTC and generated SIP command send `fathom`; legacy IDs are normalized |
-| SIP gateway image and Compose wiring | image builds with the SIP extra; local UDP 5060/40000 start without manual key or bridge URL |
-| Bridge Console Test Lab integration | shared Project selection appeared in the WebRTC panel and request preview |
-| Browser WebRTC call with a local WAV and initial text | remote audio track played; conversation UUID returned |
-| Project and attachment continuation | upstream Project association confirmed; later text-file reply stayed in the same UUID |
-| Local SIP/PCMU call with spoken WAV | SIP INVITE/BYE returned `200`; 355 RTP packets sent, 1,537 received with non-silent PCM |
-| Docker SIP/RTP transport smoke | INVITE/BYE returned `200`; 150 RTP packets sent, 1,087 received; the tone validated transport only |
+| 2026-09-29 | Browser WebRTC data channel received user/assistant text deltas and a UUID; local SIP/PCMU exchanged non-silent RTP and relayed text events; SSE history and cached reconnect behavior were checked. |
+| 2026-09-25 | Browser WebRTC played a remote audio track from a local WAV and initial text; Project continuation stayed on the same UUID; local SIP INVITE/BYE and RTP/PCMU audio succeeded. |
+| 2026-06-28 | A live image edit returned the generated output rather than the echoed uploaded input; artifact download returned `200 OK`. |
 
-Additional checks on 2026-09-29 validated the conversation event stream:
+The new mixed-file SIP flow still needs a real upstream call for each file type
+you intend to rely on. A file can be accepted and uploaded by the bridge while
+ChatGPT declines to analyze it or supplies no transcript. The voice signalling
+interface remains experimental and may change without notice.
 
-| Check | Result |
-| --- | --- |
-| Focused Python API, voice, SIP, history and event stream tests | `152 passed` |
-| Bridge Console check and production build | `0 errors, 0 warnings`; Vite build passed |
-| Browser WebRTC data channel with spoken WAV | channel opened; user/assistant text deltas and the conversation UUID were received and relayed |
-| SIP/PCMU with spoken WAV and text event relay | INVITE/BYE `200`; 259 RTP packets sent, 930 received, non-silent returned PCM; UUID discovered from data events |
-| Dashboard transcript and reconnect | existing history and reconstructed voice messages loaded over SSE; cached reconnects and local heartbeats made no upstream history requests in the HTTP regression test |
+## Upgrade Notes
 
-The voice protocol and captions remain experimental because ChatGPT Web's
-upstream interface is private. Text and text files can use the same
-conversation UUID over the regular HTTP chat route. Live text events require
-the wrapper to own the voice call; other ChatGPT Web conversations remain
-available through an on-demand history read.
+Update an older checkout before testing Projects, the Chrome connector, voice,
+SIP/RTP, or mixed attachments. Keep the existing `secrets/accounts/` and
+`outputs/` mounts when rebuilding Docker: they hold encrypted account captures,
+project mappings, conversation metadata, generated artifacts, and temporary SIP
+attachment batches. The new batches are kept under ignored
+`outputs/sip-attachments/`; no Git-hosting metadata is written there.
 
-Earlier checks were run on 2026-06-28 for the `/v1/images/edits` regression:
-
-| Check | Result |
-| --- | --- |
-| Targeted transport suite: `python3 -m pytest tests/test_chatgpt_transport.py -q` | `32 passed` |
-| Python full test suite: `python3 -m pytest -q` | `190 passed` |
-| Live `/v1/images/edits` request through the local bridge | passed with a real generated output image, not the uploaded input image |
-| Artifact download check for the generated image | `200 OK` |
-| Whitespace check: `git diff --check` | passed |
-
-The live proof used a local ChatGPT account capture. It verifies that the bridge
-now skips uploaded input images that reappear as `sediment://<same_id>` while it
-waits for the actual generated image asset.
-
-Earlier frontend/demo checks from 2026-06-26:
-
-| Check | Result |
-| --- | --- |
-| Bridge Console Svelte diagnostics: `bun run check` | `0 errors, 0 warnings` |
-| Bridge Console production build: `bun run build` | passed |
-| Character Game Svelte diagnostics: `bun run check` | `0 errors, 0 warnings` |
-| Character Game unit tests: `bun run test` | `1 file / 6 tests passed` |
-| Character Game production build: `bun run build` | passed |
-| Svelte MCP autofixer on `App.svelte` | no issues |
-| Docs/console stale-alias sweep | no `free-main`, `pro-main`, `plus-main`, or fake `pro/free` route examples found |
-
-Docker and live ChatGPT account/image/OCR/research proofs require a real local
-account capture and should be rerun on the target machine before publishing a
-release build.
-
-## Recommended Minimum Revision
-
-If you cloned or forked this project before the current CLI/capture/docs
-cleanup, update to this revision before testing Docker, the console, cURL
-capture import, image edit/composite, OCR/vision, or Deep Research cancellation.
-This revision is the recommended baseline because it:
-
-- removes confusing fake plan-account examples such as `free-main`/`pro-main`
-  from the docs and console;
-- documents Chrome/Safari `Copy as cURL` capture import, including `Cookie:` or
-  `-b` cookie input;
-- clarifies that account names are local aliases, not plan selectors;
-- fixes `/v1/images/edits` async polling so an uploaded input image echoed back
-  as `sediment://<same_id>` is not returned as the generated output;
-- keeps Docker startup separate from real ChatGPT account verification;
-- updates CLI and console docs around routing, artifacts, upload/image usage,
-  and Deep Research cancellation.
-
-Older commits may still run, but they are easier to misconfigure and are not
-the best starting point for new users.
+An existing manual account capture still works. To use the Chrome connector,
+install the unpacked extension and pair it with an **already registered** local
+account from the same signed-in Chrome profile. It does not register a new
+ChatGPT account or bypass a login challenge. See [account setup](#account-capture)
+and [Chrome connector](docs/CHROME_EXTENSION.md).
 
 ## Best Fit
 
@@ -344,8 +316,7 @@ capacity can be much higher than a single account. This does not mean the
 service is truly unlimited: ChatGPT Web can still apply hidden account, burst,
 browser-proof, or abuse limits at any time.
 
-In current testing, a Pro account can report roughly 1,000 image generations
-remaining for the day, but that is not the same thing as unlimited burst
+Reported image capacity varies by account and time; it is not the same thing as unlimited burst
 capacity. Too many concurrent image jobs can still trigger short hidden
 cooldowns. The default local throttle keeps Pro image concurrency at `3` and
 research concurrency at `2` for that reason.
@@ -425,9 +396,10 @@ Game, storage, and docs.
 | Time | Action | Result |
 | --- | --- | --- |
 | 1 min | Copy `.env.example` and start Docker | Console, API health, docs, and game shell are online. |
-| 2 min | Add one ChatGPT account capture | Chat, image, vision/OCR, and research routes can use that account. |
-| 1 min | Run capacity check | See accounts, model aliases, local concurrency, quota metadata, and artifact paths. |
-| 1 min | Try the game or API examples | Confirm the bridge works as an app backend, not only a CLI demo. |
+| 2 min | Add one ChatGPT account capture | Chat, images, vision/OCR, and research can use that account within its quota. |
+| 1 min | Open Projects and Test Lab | Pick an optional Project, send a message or file, and keep its returned conversation UUID. |
+| Optional | Load the Chrome connector | Link the existing account and let Chrome refresh its capture before expiry. |
+| Optional | Start WebRTC or SIP/RTP in Test Lab | Reuse the Project, UUID, initial text, and attachments for voice; SIP has a generated Docker command. |
 
 | Step | What works | What still needs an account capture |
 | --- | --- | --- |
@@ -439,7 +411,8 @@ Game, storage, and docs.
 ```sh
 cp .env.example .env
 mkdir -p secrets/accounts outputs
-docker compose up --build
+docker compose up -d --build
+docker compose ps
 ```
 
 ### Open The Surfaces
@@ -464,6 +437,9 @@ curl 'http://127.0.0.1:8000/v1/models' \
 
 These two checks only prove the local stack is online. Real ChatGPT chat,
 image, vision, and research calls need at least one saved account capture.
+The Console's **Test Lab** provides the shortest end-to-end test after account
+setup; its Project field is optional and an empty conversation UUID starts a
+new thread.
 
 ### Add Your First Account
 
@@ -476,6 +452,11 @@ Console flow:
    `Copy as cURL` output.
 5. Save. The Console inspects required fields first and then live-verifies the
    account before routing it.
+
+After the first manual capture, [load the Chrome extension](docs/CHROME_EXTENSION.md)
+in the signed-in Chrome profile to link that same account and renew its capture
+automatically. The extension tries loopback first; a private LAN IP is optional.
+It does not ask the Console for a second approval.
 
 CLI flow while Docker is running:
 
@@ -544,9 +525,10 @@ pin a clean route pool or skip an old/broken capture. `--account` and
 
 ## Account Capture
 
-Each ChatGPT account needs one copied browser request capture. The capture
+Each ChatGPT account needs one initial browser request capture. The capture
 contains cookies, bearer tokens, and browser proof headers. Treat it like a
-password.
+password. Once a local account exists, the optional Chrome connector can
+refresh that same account from a normal signed-in Chrome session.
 
 > [!CAUTION]
 > Account captures are credentials. Never commit them, paste them into public
@@ -564,9 +546,10 @@ Recommended routine:
 2. Sign in to the account you want to use.
 3. Do not log out after collecting the capture.
 4. Open a fresh ChatGPT conversation, or use an existing conversation if that is
-   easier. The capture is used for credentials/request shape; API calls still
-   carry the message history you send in each request and do not automatically
-   continue that browser chat.
+   easier. The capture supplies credentials and a request shape. The bridge
+   starts a new thread unless a later API request supplies a known
+   `conversation_id` UUID; it does not continue the browser tab merely because
+   that tab was used for capture.
 5. Open DevTools or Web Inspector.
 6. Go to Network.
 7. Send a small message such as `hello`.
@@ -599,9 +582,11 @@ bearer tokens
 raw request captures
 ```
 
-Captures are temporary. In practice they often last around 10 days, but this is
-not guaranteed. Refresh demo accounts weekly if you do not want them to expire
-in the middle of a run.
+Capture lifetime varies. Check Accounts for the observed expiry and re-capture
+manually when required. The [Chrome connector](docs/CHROME_EXTENSION.md) checks
+every 12 hours and, when enabled, attempts renewal within two days of expiry or
+after expiry. After three failed attempts it reports that manual intervention
+is needed; it does not bypass CAPTCHA or sign in for you.
 
 Full guide: [docs/ACCOUNT_CAPTURE.md](docs/ACCOUNT_CAPTURE.md)
 
@@ -669,23 +654,56 @@ python3 -m chatgpt_api admin account delete \
 The add/update flow inspects the capture first and should refuse to save when
 required pieces are missing.
 
+## Projects And Conversations
+
+In **Projects**, map a friendly name to a ChatGPT Project once. For a new chat,
+select that name in **Test Lab** or send it as `chatgpt_project`; the bridge
+resolves the private Project ID and its linked account locally. Leave the field
+out to create a conversation outside Projects. You may also specify `model` and
+attach supported files to the first message.
+
+```json
+{
+  "model": "auto",
+  "chatgpt_project": "Example Project",
+  "messages": [{"role": "user", "content": "Start a new conversation."}]
+}
+```
+
+`POST /v1/chat/completions` returns a top-level `conversation_id`. Keep that
+UUID and send it with the next user message to continue the **same** thread;
+omit it to start another thread. A continuation stays with its original account
+and Project. An unknown UUID returns an error rather than creating a new chat.
+The same optional Project, UUID, model, initial text, and files are available to
+the WebRTC voice session and the SIP gateway's first request. The Test Lab fills
+the UUID field after the first response.
+
 ## API Overview
 
-| Route | Purpose |
-| --- | --- |
-| `GET /health` | Server health and configuration summary. |
-| `GET /v1/models` | Models and bridge aliases visible to the current route. |
-| `GET /v1/chatgpt/usage` | Live per-account usage and quota metadata when ChatGPT reports it. |
-| `POST /v1/chat/completions` | Chat, streaming chat, tool-call bridge, chat-triggered images, and Deep Research. |
-| `POST /v1/images/generations` | Generate one completed image and save it. |
-| `POST /v1/images/edits` | Upload source image(s), edit or composite them, and save one completed image. |
-| `POST /v1/chatgpt/vision` | OCR, describe, or custom vision prompt for up to 10 input images. |
-| `GET/HEAD /v1/chatgpt/files/{file_id}/{filename}` | Download generated images or Deep Research reports. `HEAD` returns the same metadata headers without the file body. |
-| `GET /v1/chatgpt/operations/{operation_id}` | Inspect whether a long job has a selected account, conversation id, or Deep Research widget session. |
-| `POST /v1/chatgpt/operations/{operation_id}/cancel` | Cancel long chat, image, or research work when possible. |
-| `/v1/chatgpt/admin/*` | Local operator routes used by the console and CLI. |
+The examples use the Docker default bearer key for local development. Set your
+own `CHATGPT_API_KEY` before enabling access from another computer.
 
-Full route details: [docs/OPENAI_COMPATIBILITY.md](docs/OPENAI_COMPATIBILITY.md)
+| API | Format | Status | Example |
+| --- | --- | --- | --- |
+| `GET /health` | JSON | Implemented local health check | `GET http://127.0.0.1:8000/health` |
+| `GET /v1/models` | JSON | Implemented model/alias catalog | `GET /v1/models` |
+| `POST /v1/chat/completions` | JSON or SSE with `"stream":true` | Implemented chat, Project routing, UUID continuity, supported files, tools, and research where applicable | `{"model":"auto","messages":[{"role":"user","content":"Hello"}]}` |
+| `POST /v1/images/generations` | JSON | Implemented completed image artifact | `{"model":"gpt-image-1","prompt":"A lighthouse"}` |
+| `POST /v1/images/edits` | JSON | Implemented image edit/composite | `{"image":"./source.png","prompt":"Change the color"}` |
+| `POST /v1/chatgpt/vision` | JSON | Implemented OCR/description for up to 10 images | `{"mode":"ocr","image":"./page.png"}` |
+| `GET/HEAD /v1/chatgpt/files/{file_id}/{filename}` | File body / headers | Implemented artifact download | `GET /v1/chatgpt/files/<id>/result.png` |
+| `GET /v1/chatgpt/operations/{operation_id}` | JSON | Implemented long-job status | `GET /v1/chatgpt/operations/<id>` |
+| `POST /v1/chatgpt/operations/{operation_id}/cancel` | JSON | Implemented cancellation when upstream permits it | `POST /v1/chatgpt/operations/<id>/cancel` |
+| `GET /v1/chatgpt/usage` | JSON | Implemented; fields depend on upstream availability | `GET /v1/chatgpt/usage` |
+| `GET /v1/chatgpt/admin/projects` | JSON | Implemented local Project mappings | `GET /v1/chatgpt/admin/projects` |
+| `POST /v1/chatgpt/admin/projects/save` | JSON | Implemented; Console can create/update the mapping | `{"name":"Example Project","project_id":"g-p-...","account":"<local-alias>"}` |
+| `POST /v1/chatgpt/admin/projects/delete` | JSON | Implemented mapping removal | `{"alias":"example-project"}` |
+| `GET /v1/chatgpt/admin/extension` | JSON | Implemented paired-connector status | `GET /v1/chatgpt/admin/extension` |
+
+Admin routes are local operator endpoints. Full request and response details:
+[OpenAI-shaped API guide](docs/OPENAI_COMPATIBILITY.md),
+[voice transport](docs/VOICE_TRANSPORT.md), and
+[Chrome connector](docs/CHROME_EXTENSION.md).
 
 ### Voice, Project, And File APIs
 
@@ -737,6 +755,60 @@ does not select the voice model; ChatGPT chooses that model automatically. The
 private signalling response does not confirm which voice produced the audio, so
 this integration remains experimental. See [voice transport](docs/VOICE_TRANSPORT.md)
 for full request and setup details.
+
+## File Inputs
+
+Attach files to an ordinary chat message or the **first** WebRTC/SIP voice
+request. In Test Lab, choose files in Chat; for SIP, use **Preparar adjuntos**
+to stage a list before copying the generated gateway command. The gateway
+fetches the batch and sends it with the first voice offer. Reconnects do not
+replay the files. The batch expires after 24 hours.
+
+| Kind | Supported extensions | How it is sent |
+| --- | --- | --- |
+| UTF-8 text | `.txt`, `.md`, `.csv`, `.json`, `.html`, `.xml`, `.yaml`, `.yml`, `.log` | Inline file content part |
+| Documents | `.pdf`, `.docx`, `.xlsx`, `.pptx` | Inline file content part |
+| Images | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` | Inline file content part |
+| Audio | `.wav`, `.mp3` | Generic attachment or supported `input_audio` content part |
+
+The bridge accepts up to **10 files**, **20 MiB per file**, and **25 MiB per
+request**. Audio attachments do not promise speech-to-text; actual analysis
+depends on ChatGPT Web. File-bearing chat requests cannot combine attachments
+with tools, agent mode, or Deep Research. See the [request example and limits](docs/OPENAI_COMPATIBILITY.md#file-attachments).
+
+## Chrome Connector
+
+The extension renews a **previously registered** account from a normal,
+signed-in Chrome session. First, save the account once in Console **Accounts**
+using the [manual capture flow](#add-your-first-account). Then:
+
+1. Start the API and Console: `docker compose up -d --build chatgpt-api bridge-console`.
+2. In Chrome, open `chrome://extensions`, enable **Developer mode**, choose
+   **Load unpacked**, and select this repository's `extensions/chrome-bridge`
+   directory. Keep the extension installed in the same Chrome profile you use
+   for ChatGPT.
+3. Sign in normally at `https://chatgpt.com` in that profile and solve any
+   login challenge yourself.
+4. Open the extension and select **Conectar ahora**. It checks `127.0.0.1`,
+   then `localhost` on port `8000`. If Docker runs on another machine, enter
+   only that computer's private LAN IP. Pairing and the first refresh happen
+   in the extension; there is no second approval in Console.
+5. Check the pulse: **green** ready, **yellow** expiring, **red** needs
+   attention, **blue** connecting, **gray** paused. Toggle automatic renewal
+   on the pulse/switch. **Renovar ahora** starts a refresh immediately.
+
+With automatic renewal on, the worker checks every 12 hours and refreshes
+within two days of token expiry or after expiry. It retries a failed refresh
+up to three times and then requests manual intervention. A successful automatic
+refresh shows a check. The status is an estimate: a future expiry does not
+prove ChatGPT has not revoked the session. If Chrome is signed out or a
+CAPTCHA/login challenge appears, sign in manually; the extension does not
+bypass it.
+
+For a separate trusted LAN host, bind the API to `0.0.0.0`, set a strong
+`CHATGPT_API_KEY` in your private `.env`, and expose TCP `8000` only to that
+LAN. The extension requires a specific IP rather than scanning arbitrary LAN
+subnets. See [connector setup, pairing, and security notes](docs/CHROME_EXTENSION.md).
 
 ## Chat Example
 
@@ -1201,16 +1273,17 @@ chatgpt-api admin delete-artifact \
 
 The console is the operational UI, not just a demo page.
 
-![Accounts page](docs/assets/screenshots/oss-console-accounts.png)
+![Chrome connector controls in Accounts, with example identifiers](docs/assets/screenshots/console-chrome-connector.png)
 
 It provides:
 
-- system health and API status
-- account list, add, update, verify, and delete flows
-- account-name validation
-- usage and capacity views
+- system health and API status, including account connection state in the header
+- account capture, verification, connector status, and revocation controls
+- Project mappings by friendly name, with local account association
+- usage and capacity views for the local operator
 - route documentation with request and response examples
-- test lab for chat, context, image, vision/OCR, and research
+- Test Lab for chat, conversation UUID reuse, files, WebRTC voice, SIP/RTP
+  commands, live text messages, image, vision/OCR, and research
 - storage/library view for completed artifacts
 - opencode inject/eject/status controls
 
@@ -1577,7 +1650,7 @@ Full Docker guide: [docs/DOCKER.md](docs/DOCKER.md)
 ```text
 chatgpt_api/
   core/                 Provider-neutral request/response contracts.
-  providers/chatgpt/    ChatGPT Web capture, auth, token refresh, proof, transport, models.
+  providers/chatgpt/    ChatGPT Web capture, auth, transport, models, SIP gateway.
   api/                  Local HTTP API facade, admin routes, image input parsing, prompts.
   cli.py                Operator CLI and direct provider commands.
 
@@ -1585,15 +1658,23 @@ apps/
   bridge-console/       Svelte/Vite operator console.
   character-game/       SvelteKit roleplay game use case.
 
+extensions/
+  chrome-bridge/        Manifest V3 account connector and status popup.
+
 integrations/
   opencode/             opencode config injector and launcher.
+
+scripts/
+  sip_rtp_smoke.py      Local SIP/UDP and RTP/PCMU smoke test.
 
 docs/
   ACCOUNT_CAPTURE.md    Browser capture guide.
   ARCHITECTURE.md       Maintainer architecture notes.
   CLI.md                CLI guide.
   DOCKER.md             Docker and Compose guide.
+  CHROME_EXTENSION.md   Connector install, renewal, pairing, and limits.
   OPENAI_COMPATIBILITY.md API route and response details.
+  VOICE_TRANSPORT.md    WebRTC and SIP/RTP API, events, and examples.
   PROJECT_ANALYSIS.md   Maintainer-level project analysis.
   assets/screenshots/   Screenshot evidence from the Docker stack.
 
@@ -1731,6 +1812,7 @@ opencode does not use the bridge
 ## Documentation Index
 
 - [Account capture guide](docs/ACCOUNT_CAPTURE.md)
+- [Chrome connector setup and renewal](docs/CHROME_EXTENSION.md)
 - [CLI guide](docs/CLI.md)
 - [Docker guide](docs/DOCKER.md)
 - [OpenAI-shaped API guide](docs/OPENAI_COMPATIBILITY.md)
