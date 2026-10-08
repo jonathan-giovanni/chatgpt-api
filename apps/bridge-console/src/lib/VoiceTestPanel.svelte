@@ -2,7 +2,7 @@
   import { onDestroy } from "svelte";
   import { VoiceEventRelay } from "./conversationStream";
 
-  type TextAttachment = { filename: string; file_data: string };
+  type Attachment = { filename: string; file_data: string };
   type ProjectOption = { alias: string; name: string; account: string };
   type VoiceResponse = {
     error?: { message?: string };
@@ -41,7 +41,7 @@
   const VOICE_IDLE_TIMEOUT_MS = 30_000;
   const INPUT_SILENCE_MS = 900;
   const OUTPUT_SILENCE_MS = 1_200;
-  const TEXT_EXTENSIONS = /\.(txt|md|csv|json)$/i;
+  const ATTACHMENT_EXTENSIONS = /\.(txt|md|csv|json|html|xml|yaml|yml|log|pdf|docx|xlsx|pptx|png|jpg|jpeg|webp|gif|wav|mp3)$/i;
   const voices = [
     { value: "fathom", label: "Arbor (predeterminada)" },
     { value: "breeze", label: "Breeze" },
@@ -64,6 +64,10 @@
   let followup = $state("");
   let followupFiles = $state<File[]>([]);
   let followupFileError = $state("");
+  let sipFiles = $state<File[]>([]);
+  let sipBatchId = $state("");
+  let sipAttachmentError = $state("");
+  let sipPreparing = $state(false);
   let remoteAudio: HTMLAudioElement;
 
   let peer: RTCPeerConnection | null = null;
@@ -111,21 +115,24 @@
       initialText.trim()
         ? `-e CHATGPT_SIP_TEXT=${powerShellQuote(initialText.trim())}`
         : "",
+      sipBatchId
+        ? `-e CHATGPT_SIP_ATTACHMENT_BATCH=${powerShellQuote(sipBatchId)}`
+        : "",
       "sip-gateway",
     ]
       .filter(Boolean)
       .join(" "),
   );
 
-  async function readAttachments(files: File[]): Promise<TextAttachment[]> {
-    if (files.some((file) => !TEXT_EXTENSIONS.test(file.name))) {
+  async function readAttachments(files: File[]): Promise<Attachment[]> {
+    if (files.some((file) => !ATTACHMENT_EXTENSIONS.test(file.name))) {
       throw new Error(
-        "En Voz solo se adjuntan TXT, MD, CSV o JSON; usa el campo de audio para WAV o MP3.",
+        "Formato no admitido. Usa texto, PDF, Office, imagen, WAV o MP3.",
       );
     }
     if (
       files.length > 10 ||
-      files.some((file) => file.size > AUDIO_SIZE_LIMIT) ||
+      files.some((file) => !file.size || file.size > AUDIO_SIZE_LIMIT) ||
       files.reduce((sum, file) => sum + file.size, 0) > 25 * 1024 * 1024
     ) {
       throw new Error(
@@ -135,7 +142,7 @@
     return Promise.all(
       files.map(
         (file) =>
-          new Promise<TextAttachment>((resolve, reject) => {
+          new Promise<Attachment>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () =>
               resolve({
@@ -148,6 +155,47 @@
           }),
       ),
     );
+  }
+
+  function selectSipFiles(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    sipFiles = Array.from(input.files || []);
+    sipBatchId = "";
+    sipAttachmentError = "";
+    input.value = "";
+    if (sipFiles.length) {
+      try {
+        if (sipFiles.some((file) => !ATTACHMENT_EXTENSIONS.test(file.name)))
+          throw new Error("Formato no admitido. Usa texto, PDF, Office, imagen, WAV o MP3.");
+        if (sipFiles.length > 10 || sipFiles.some((file) => !file.size || file.size > AUDIO_SIZE_LIMIT)
+          || sipFiles.reduce((sum, file) => sum + file.size, 0) > 25 * 1024 * 1024)
+          throw new Error("Máximo 10 archivos, 20 MiB cada uno y 25 MiB en total.");
+      } catch (error) {
+        sipAttachmentError = error instanceof Error ? error.message : String(error);
+      }
+    }
+  }
+
+  async function prepareSipAttachments() {
+    sipPreparing = true;
+    sipAttachmentError = "";
+    sipBatchId = "";
+    try {
+      const files = await readAttachments(sipFiles);
+      if (!files.length) throw new Error("Selecciona al menos un adjunto.");
+      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/chatgpt/voice/attachments`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ files }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error?.message || "No se pudieron preparar los adjuntos.");
+      sipBatchId = result.attachment_batch_id;
+    } catch (error) {
+      sipAttachmentError = error instanceof Error ? error.message : String(error);
+    } finally {
+      sipPreparing = false;
+    }
   }
 
   async function prepareInput() {
@@ -575,11 +623,11 @@
     const input = event.currentTarget as HTMLInputElement;
     followupFiles = Array.from(input.files || []);
     followupFileError = followupFiles.some(
-      (file) => !TEXT_EXTENSIONS.test(file.name),
+      (file) => !ATTACHMENT_EXTENSIONS.test(file.name),
     )
-      ? "Solo TXT, MD, CSV o JSON."
+      ? "Formato no admitido. Usa texto, PDF, Office, imagen, WAV o MP3."
       : followupFiles.length > 10 ||
-          followupFiles.some((file) => file.size > AUDIO_SIZE_LIMIT) ||
+          followupFiles.some((file) => !file.size || file.size > AUDIO_SIZE_LIMIT) ||
           followupFiles.reduce((sum, file) => sum + file.size, 0) >
             25 * 1024 * 1024
         ? "Máximo 10 archivos, 20 MiB por archivo y 25 MiB en total."
@@ -648,7 +696,7 @@
       </h3>
       <p class="mt-2 text-sm text-slate-400">
         Usa directamente el proyecto, modelo, UUID, mensaje inicial y adjuntos
-        de texto del panel Chat.
+        del panel Chat.
       </p>
     </div>
     <span
@@ -744,7 +792,7 @@
     </p>
   {/if}
   <p class="mt-3 text-xs text-slate-400">
-    El mensaje y los adjuntos de texto configurados arriba se envían al mismo
+    El mensaje y los adjuntos configurados arriba se envían al mismo
     hilo antes de iniciar voz. El archivo de audio se reproduce como entrada
     WebRTC; no se sube como adjunto.
   </p>
@@ -789,10 +837,10 @@
         <input
           type="file"
           multiple
-          accept=".txt,.md,.csv,.json"
+          accept=".txt,.md,.csv,.json,.html,.xml,.yaml,.yml,.log,.pdf,.docx,.xlsx,.pptx,.png,.jpg,.jpeg,.webp,.gif,.wav,.mp3"
           onchange={selectFollowupFiles}
           disabled={busy}
-          aria-label="Adjuntar archivos de texto a la continuación"
+          aria-label="Adjuntar archivos a la continuación"
         />
         <button
           class="rounded-xl border border-cyan-300/30 bg-cyan-300/10 px-4 py-2 font-bold text-cyan-100"
@@ -819,11 +867,41 @@
       con el usuario «voice» y sin clave. Requiere una cuenta ChatGPT
       configurada.
     </p>
+    <label class="mt-4 block text-sm font-bold text-slate-300">
+      Adjuntos al iniciar la llamada SIP/RTP
+      <input class="mt-2 block w-full text-sm" type="file" multiple
+        accept=".txt,.md,.csv,.json,.html,.xml,.yaml,.yml,.log,.pdf,.docx,.xlsx,.pptx,.png,.jpg,.jpeg,.webp,.gif,.wav,.mp3"
+        onchange={selectSipFiles} />
+    </label>
+    {#if sipFiles.length}
+      <div class="mt-2 space-y-1 text-xs text-slate-300">
+        {#each sipFiles as file, index}
+          <div class="flex items-center justify-between gap-2">
+            <span class="break-all">{file.name} · {Math.ceil(file.size / 1024)} KiB</span>
+            <button class="text-rose-300" onclick={() => {
+              sipFiles = sipFiles.filter((_, i) => i !== index);
+              sipBatchId = "";
+              sipAttachmentError = "";
+            }}>Quitar</button>
+          </div>
+        {/each}
+      </div>
+      <button class="mt-3 rounded-xl border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-sm font-bold text-cyan-100"
+        onclick={prepareSipAttachments} disabled={sipPreparing}>
+        {sipPreparing ? "Preparando…" : "Preparar adjuntos"}
+      </button>
+      {#if sipBatchId}<p class="mt-2 text-xs text-emerald-300">Adjuntos listos para la siguiente llamada.</p>{/if}
+    {/if}
+    {#if sipAttachmentError}<p role="alert" class="mt-2 text-sm text-rose-300">{sipAttachmentError}</p>{/if}
+    <p class="mt-2 text-xs text-slate-400">
+      Hasta 10 archivos y 25 MiB en total. Prepara la lista antes de copiar el comando.
+      El gateway los envía junto al mensaje inicial; si lo dejas vacío, añade un mensaje breve para darles contexto.
+    </p>
     <p class="mt-3 text-xs font-black uppercase tracking-wider text-slate-400">
       Terminal A · gateway Docker
     </p>
     <pre
-      class="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-3 text-xs text-cyan-100">{sipGatewayCommand}</pre>
+      class="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-3 text-xs text-cyan-100">{sipFiles.length && !sipBatchId ? "Prepara los adjuntos para obtener el comando completo." : sipGatewayCommand}</pre>
     <p class="mt-3 text-xs font-black uppercase tracking-wider text-slate-400">
       Terminal B · prueba automática opcional
     </p>

@@ -42,6 +42,8 @@ GET  /v1/models
 GET  /v1/chatgpt/usage
 POST /v1/chat/completions
 POST /v1/chatgpt/voice/sessions
+POST /v1/chatgpt/voice/attachments
+GET  /v1/chatgpt/voice/attachments/{attachment_batch_id}
 POST /v1/chatgpt/voice/sessions/{bridge_session_id}/events
 POST /v1/chatgpt/voice/sessions/release
 GET  /v1/chatgpt/conversations/{uuid}/messages
@@ -70,8 +72,10 @@ implement the voice-session or event-ingestion POST routes.
 2. In a second terminal, run
    `docker compose run --rm --build --service-ports sip-gateway`. To choose a
    Project, voice, model, existing conversation UUID, or initial text, copy the
-   generated SIP command from the dashboard's **Test Lab**. With no Project or
-   UUID, the call starts a new conversation outside Projects.
+   generated SIP command from the dashboard's **Test Lab**. To include files,
+   select them in its SIP/RTP section, click **Preparar adjuntos**, then copy
+   the updated command. With no Project or UUID, the call starts a new
+   conversation outside Projects.
 3. Call `sip:voice@127.0.0.1:5060` from MicroSIP using UDP, no password, and
    codec PCMU/8000; disable STUN and SRTP. The gateway accepts one local call
    at a time.
@@ -297,22 +301,31 @@ Project. An unknown UUID is rejected instead of silently creating a different
 conversation. Continuations currently support ordinary chat and bounded file
 attachments, without tools, agent mode, or Deep Research.
 
-### Text and audio attachments
+### File attachments
 
-`POST /v1/chat/completions` accepts inline text files and audio in ordinary
+`POST /v1/chat/completions` accepts inline files in ordinary
 new or existing conversations. The bridge uploads each attachment to ChatGPT and keeps the
 normal optional `chatgpt_project` routing field.
 
 Supported inputs:
 
-- text: UTF-8 `.txt`, `.md`, `.csv`, and `.json`
-- audio: WAV and MP3 through an `input_audio` content part
+- text: UTF-8 `.txt`, `.md`, `.csv`, `.json`, `.html`, `.xml`, `.yaml`, `.yml`, and `.log`
+- documents: `.pdf`, `.docx`, `.xlsx`, and `.pptx`
+- images: `.png`, `.jpg`, `.jpeg`, `.webp`, and `.gif`
+- audio: `.wav` and `.mp3` as file attachments, or through an `input_audio` content part
 - data: raw base64 or a matching `data:<mime>;base64,...` URL
 
 The bridge accepts at most 10 attachments, 20 MiB per attachment, and 25 MiB
 combined. These are conservative bridge limits. Inline `file_id` references,
 Deep Research, tools, and agent mode are rejected for requests
 with files so an attachment is never silently discarded.
+
+For SIP/RTP, `POST /v1/chatgpt/voice/attachments` accepts
+`{"files":[{"filename":"brief.pdf","file_data":"<base64>"}]}` and returns
+`attachment_batch_id`. The authenticated gateway retrieves it with
+`GET /v1/chatgpt/voice/attachments/{attachment_batch_id}` before starting the
+call; the initial voice-session request carries that list together with the
+initial text and Project. Batches remain local and expire after 24 hours.
 
 Text-file request:
 

@@ -3,7 +3,7 @@
 This is an experimental adapter to ChatGPT Web's private Voice signalling, not
 the public OpenAI Realtime API. The primary UI is the WebRTC panel inside the
 Bridge Console Test Lab at `http://127.0.0.1:8080/#test-lab`. It shares the chat
-test's selected Project, model, conversation UUID, initial text, and text
+test's selected Project, model, conversation UUID, initial text, and
 attachments. It accepts a local audio file or microphone. The ChatGPT credential
 stays on the bridge. Media flows through WebRTC directly between the peer and
 ChatGPT; the bridge handles SDP, optional chat preparation, and text event fan-out.
@@ -18,8 +18,8 @@ reconnects are attempted twice; if they fail, the session is released.
 
 1. Start both local services: `docker compose up -d --build chatgpt-api bridge-console`.
 2. Open `http://127.0.0.1:8080/#test-lab` in the Bridge Console. Use **Refresh** if its status is still loading.
-3. In **Single message test**, select a Project (optional), model, existing conversation UUID if continuing, initial message, and text attachments.
-4. In **Voz en esta conversación** below it, choose a local audio file or microphone and start voice. The panel uses the same Project, model, UUID, message, and text files. An empty Project creates the conversation outside Projects.
+3. In **Single message test**, select a Project (optional), model, existing conversation UUID if continuing, initial message, and supported attachments.
+4. In **Voz en esta conversación** below it, choose a local audio file or microphone and start voice. The panel uses the same Project, model, UUID, message, and attachments. An empty Project creates the conversation outside Projects.
 5. When the UUID is known, use the voice panel's follow-up composer for text or text-file turns in the same thread. The outer chat panel also receives that UUID for later chat tests. Finalizar releases the voice binding.
 6. The **Mensajes de voz y texto** panel below the voice controls reads that UUID automatically. You can also paste a UUID from a SIP call. It loads history once and then receives text events. **Actualizar** explicitly reloads history; the panel does not poll ChatGPT.
 
@@ -46,7 +46,7 @@ Content-Type: application/json
   "model": "auto",
   "project": "My Project",
   "text": "Start by summarizing these notes.",
-  "files": [{"filename": "notes.txt", "file_data": "<base64 UTF-8>"}]
+  "files": [{"filename": "notes.pdf", "file_data": "<base64>"}]
 }
 ```
 
@@ -225,8 +225,14 @@ gateway's UUID and the SSE command, see the
 [API walkthrough](OPENAI_COMPATIBILITY.md#siprtp-call-with-live-text).
 
 The Bridge Console command includes the selected project, voice ID, model, UUID
-and text. Arbor (`fathom`) is the default voice, and the selected internal voice
-ID is passed to both WebRTC and SIP/RTP.
+and text. In the SIP/RTP section, select files and click **Preparar adjuntos**.
+The console uploads them to a local, authenticated batch and adds its ID to the
+generated Docker command. The gateway fetches that list and sends all files
+with the initial text in the first voice-session request. If the initial text is
+empty, it adds a short context message. Reconnects do not replay attachments.
+Arbor (`fathom`) is the default voice, and the selected internal voice ID is
+passed to both WebRTC and SIP/RTP. Staged batches expire after 24 hours and
+stay under the ignored local `outputs/sip-attachments/` directory until cleanup.
 The gateway opens UDP 5060 for SIP and UDP 40000 for RTP, bound to loopback.
 MicroSIP can connect directly with server/domain `127.0.0.1`, user `voice`,
 UDP 5060, and no password. Registration is accepted locally without
@@ -244,7 +250,11 @@ the client stops sending RTP or voice activity remains absent for 30 seconds.
 
 For a direct CLI run, the same context is available through `--model`,
 `--project`, `--conversation-id`, `--text`, and repeatable `--attachment path`
-options. The Docker service receives the first four from the wrapper command.
+options. `--attachment-batch sa_<id>` accepts a batch prepared through the API
+or console. Supported files can be mixed: UTF-8 TXT/MD/CSV/JSON/HTML/XML/YAML/LOG,
+PDF, DOCX/XLSX/PPTX, PNG/JPEG/WebP/GIF, and WAV/MP3. The bridge allows at most
+10 attachments, 20 MiB each, and 25 MiB total. Upstream processing of audio
+attachments depends on the selected ChatGPT model.
 The bridge bearer key is never sent in SIP or RTP. The local gateway has no SIP
 Digest, TLS, SRTP, NAT traversal, transcoding, or multi-call support; use a
 PBX/SBC for those functions, and do not publish its ports outside a trusted

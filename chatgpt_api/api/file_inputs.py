@@ -18,8 +18,33 @@ TEXT_MIME_TYPES = {
     ".md": "text/markdown",
     ".csv": "text/csv",
     ".json": "application/json",
+    ".html": "text/html",
+    ".xml": "application/xml",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".log": "text/plain",
 }
 AUDIO_MIME_TYPES = {"wav": "audio/wav", "mp3": "audio/mpeg"}
+DOCUMENT_MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+FILE_MIME_TYPES = {
+    **TEXT_MIME_TYPES,
+    **DOCUMENT_MIME_TYPES,
+    **IMAGE_MIME_TYPES,
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+}
 
 
 def _decode_data(value: Any, expected_mime: str) -> bytes:
@@ -71,27 +96,42 @@ def file_content_part(item: dict[str, Any]) -> ContentPart:
         ):
             raise ValueError("filename must be a basename of at most 200 characters")
         suffix = PurePosixPath(name).suffix.lower()
-        mime = TEXT_MIME_TYPES.get(suffix)
+        mime = FILE_MIME_TYPES.get(suffix)
         if mime is None:
             raise ValueError(
-                "supported text filenames: .txt, .md, .csv, .json; use input_audio for audio"
+                "unsupported attachment type; use a supported text, document, image, WAV or MP3 file"
             )
         data = _decode_data(value.get("file_data"), mime)
-        try:
-            data.decode("utf-8-sig")
-        except UnicodeDecodeError as exc:
-            raise ValueError("text files must use UTF-8 encoding") from exc
-        if b"\0" in data:
-            raise ValueError("text files must not contain NUL bytes")
-    if audio and name.endswith(".wav") and not (
+        if suffix in TEXT_MIME_TYPES:
+            try:
+                data.decode("utf-8-sig")
+            except UnicodeDecodeError as exc:
+                raise ValueError("text files must use UTF-8 encoding") from exc
+            if b"\0" in data:
+                raise ValueError("text files must not contain NUL bytes")
+        elif suffix == ".pdf" and not data.startswith(b"%PDF-"):
+            raise ValueError("file data is not a PDF")
+        elif suffix in {".docx", ".xlsx", ".pptx"} and not data.startswith(b"PK\x03\x04"):
+            raise ValueError("file data is not an Office Open XML container")
+        elif suffix == ".png" and not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("file data is not a PNG")
+        elif suffix in {".jpg", ".jpeg"} and not data.startswith(b"\xff\xd8\xff"):
+            raise ValueError("file data is not a JPEG")
+        elif suffix == ".webp" and not (data[:4] == b"RIFF" and data[8:12] == b"WEBP"):
+            raise ValueError("file data is not a WebP image")
+        elif suffix == ".gif" and not data.startswith((b"GIF87a", b"GIF89a")):
+            raise ValueError("file data is not a GIF")
+    if name.lower().endswith(".wav") and not (
         data[:4] == b"RIFF" and data[8:12] == b"WAVE"
     ):
-        raise ValueError("input_audio data is not a WAV container")
-    if audio and name.endswith(".mp3") and not (
+        raise ValueError("audio data is not a WAV container")
+    if name.lower().endswith(".mp3") and not (
         data.startswith(b"ID3")
         or (len(data) >= 2 and data[0] == 255 and data[1] & 0xE0 == 0xE0)
     ):
-        raise ValueError("input_audio data is not an MP3 container")
+        raise ValueError("audio data is not an MP3 container")
+    if not audio and PurePosixPath(name).suffix.lower() in IMAGE_MIME_TYPES:
+        return ContentPart.image_bytes(data, mime, name)
     return ContentPart.file_bytes(data, mime, name)
 
 
@@ -100,12 +140,12 @@ def validate_file_parts(messages: list[Any]) -> None:
         part
         for message in messages
         for part in message.content
-        if part.kind == "file_bytes"
+        if part.kind in {"file_bytes", "image_bytes"}
     ]
     if not parts:
         return
     if any(
-        message.role != "user" and any(p.kind == "file_bytes" for p in message.content)
+        message.role != "user" and any(p.kind in {"file_bytes", "image_bytes"} for p in message.content)
         for message in messages
     ):
         raise ValueError("file and input_audio parts require role=user")
