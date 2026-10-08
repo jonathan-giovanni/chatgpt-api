@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from chatgpt_api.api.file_inputs import MAX_FILE_BYTES, MAX_INPUT_FILES, MAX_TOTAL_FILE_BYTES, file_content_part
 from chatgpt_api.providers.chatgpt.voice_events import VoiceEventRelay
 
 
@@ -242,6 +243,20 @@ class SipGateway:
         self.rtp_transport: asyncio.DatagramTransport | None = None
         self.call: Call | None = None
 
+    def _voice_request(self, call: Call, offer_sdp: str) -> dict[str, Any]:
+        request: dict[str, Any] = {"offer_sdp": offer_sdp, "voice": self.voice}
+        if call.bridge_session_id:
+            request["bridge_session_id"] = call.bridge_session_id
+        else:
+            request.update({
+                "model": self.model, "project": self.project,
+                "conversation_id": self.conversation_id,
+                "text": (self.text.strip() if self.text and self.text.strip() else None)
+                        or ("Ten en cuenta los archivos adjuntos durante esta llamada." if self.files else None),
+                "files": self.files,
+            })
+        return request
+
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         self.sip_transport, _ = await loop.create_datagram_endpoint(
@@ -389,13 +404,7 @@ class SipGateway:
 
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
-        request = {"offer_sdp": pc.localDescription.sdp, "voice": self.voice}
-        if call.bridge_session_id:
-            request["bridge_session_id"] = call.bridge_session_id
-        else:
-            request.update({"model": self.model, "project": self.project,
-                            "conversation_id": self.conversation_id,
-                            "text": self.text, "files": self.files})
+        request = self._voice_request(call, pc.localDescription.sdp)
         async with httpx.AsyncClient(timeout=90) as client:
             response = await client.post(
                 self.bridge_url + "/v1/chatgpt/voice/sessions", json=request,
@@ -566,6 +575,41 @@ class SipGateway:
         return response
 
 
+def load_initial_attachments(
+    paths: list[Path], batch_id: str | None, bridge_url: str, api_key: str,
+) -> list[dict[str, str]]:
+    files: list[dict[str, str]] = []
+    if batch_id:
+        if not re.fullmatch(r"sa_[a-f0-9]{32}", batch_id):
+            raise ValueError("invalid attachment batch ID")
+        response = httpx.get(
+            bridge_url.rstrip("/") + "/v1/chatgpt/voice/attachments/" + batch_id,
+            headers={"Authorization": f"Bearer {api_key}"}, timeout=45,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("files"), list):
+            raise ValueError("invalid staged attachment list")
+        files.extend(payload["files"])
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f"attachment is not a file: {path}")
+        if path.stat().st_size > MAX_FILE_BYTES:
+            raise ValueError("each attachment must be at most 20 MiB")
+        files.append({"filename": path.name, "file_data": base64.b64encode(path.read_bytes()).decode("ascii")})
+    if len(files) > MAX_INPUT_FILES:
+        raise ValueError("at most 10 attachments are supported")
+    total = 0
+    for item in files:
+        if not isinstance(item, dict):
+            raise ValueError("invalid staged attachment")
+        part = file_content_part({"type": "file", "file": item})
+        total += len(part.data or b"")
+        if total > MAX_TOTAL_FILE_BYTES:
+            raise ValueError("attachments exceed 25 MiB total")
+    return files
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="One-call SIP/RTP PCMU gateway for ChatGPT Web Voice")
     parser.add_argument("--bridge-url", default=os.environ.get("CHATGPT_SIP_BRIDGE_URL", "http://127.0.0.1:8000"))
@@ -580,6 +624,7 @@ def main() -> None:
     parser.add_argument("--conversation-id", default=os.environ.get("CHATGPT_SIP_CONVERSATION_ID"))
     parser.add_argument("--text", default=os.environ.get("CHATGPT_SIP_TEXT"))
     parser.add_argument("--attachment", action="append", default=[], type=Path)
+    parser.add_argument("--attachment-batch", default=os.environ.get("CHATGPT_SIP_ATTACHMENT_BATCH"))
     args = parser.parse_args()
     key = os.environ.get("CHATGPT_API_KEY")
     if not key:
@@ -591,20 +636,10 @@ def main() -> None:
         parser.error("remote --bridge-url requires HTTPS to protect the bridge key")
     if args.listen_ip == "0.0.0.0" and not args.advertise_ip:
         parser.error("--advertise-ip is required when listening on all interfaces")
-    if len(args.attachment) > 10 or sum(path.stat().st_size for path in args.attachment) > 25 * 1024 * 1024:
-        parser.error("attachments exceed 10 files or 25 MiB total")
-    files = []
-    for path in args.attachment:
-        if path.suffix.lower() not in {".txt", ".md", ".csv", ".json"} or path.stat().st_size > 20 * 1024 * 1024:
-            parser.error("attachments must be supported text files of at most 20 MiB")
-        contents = path.read_bytes()
-        try:
-            contents.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            parser.error("attachments must be UTF-8 text")
-        files.append({"filename": path.name, "file_data": base64.b64encode(contents).decode("ascii")})
-    if files and not args.text:
-        parser.error("--text is required with --attachment")
+    try:
+        files = load_initial_attachments(args.attachment, args.attachment_batch, args.bridge_url, key)
+    except (ValueError, OSError, httpx.HTTPError) as exc:
+        parser.error(f"cannot load SIP attachments: {exc}")
     gateway = SipGateway(
         bridge_url=args.bridge_url, api_key=key, listen_ip=args.listen_ip,
         advertise_ip=args.advertise_ip or args.listen_ip,

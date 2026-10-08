@@ -843,9 +843,6 @@
   const visibleModelIds = $derived(
     modelIds.length ? modelIds : fallbackModelIds(),
   );
-  const voiceTextFiles = $derived(
-    chatFiles.filter((file) => /\.(txt|md|csv|json)$/i.test(file.name)),
-  );
   const selectedChatProjectName = $derived(
     projects.find((project) => project.alias === selectedChatProject)?.name ?? "",
   );
@@ -1378,8 +1375,8 @@
     const files = Array.from(input.files || []);
     chatFilesError = files.length > 10
       ? "Máximo 10 archivos."
-      : files.some((file) => !/\.(txt|md|csv|json|wav|mp3)$/i.test(file.name))
-        ? "Formatos admitidos: TXT, MD, CSV, JSON, WAV y MP3."
+      : files.some((file) => !/\.(txt|md|csv|json|html|xml|yaml|yml|log|pdf|docx|xlsx|pptx|png|jpg|jpeg|webp|gif|wav|mp3)$/i.test(file.name))
+        ? "Formatos admitidos: texto, PDF, Office, imagen, WAV y MP3."
         : files.some((file) => !file.size || file.size > 20 * 1024 * 1024)
           ? "Cada archivo debe ocupar entre 1 byte y 20 MiB."
           : files.reduce((total, file) => total + file.size, 0) > 25 * 1024 * 1024
@@ -3977,11 +3974,11 @@
             <Input label="Model" bind:value={chatModel} />
             <Textarea label="Message" bind:value={chatPrompt} rows={5} />
             <label class="mt-4 block text-sm font-bold text-slate-300">
-              Adjuntar audio o texto
-              <input class="mt-2 block w-full text-sm" type="file" multiple accept=".txt,.md,.csv,.json,.wav,.mp3" onchange={selectChatFiles} disabled={Boolean(chatConversationId.trim())} />
+              Adjuntar archivos
+              <input class="mt-2 block w-full text-sm" type="file" multiple accept=".txt,.md,.csv,.json,.html,.xml,.yaml,.yml,.log,.pdf,.docx,.xlsx,.pptx,.png,.jpg,.jpeg,.webp,.gif,.wav,.mp3" onchange={selectChatFiles} disabled={Boolean(chatConversationId.trim())} />
             </label>
             <p class="mt-2 text-xs text-slate-400">
-              TXT, MD, CSV y JSON en UTF-8; audio WAV o MP3 como archivo adjunto.
+              Texto en UTF-8, PDF, Office, imágenes y audio WAV o MP3 como adjuntos.
               Máximo 10 archivos, 20 MiB por archivo y 25 MiB en total.
               Los adjuntos solo se aceptan al crear una conversación nueva.
               El análisis de audio depende del modelo; no es el modo Voz.
@@ -4023,7 +4020,7 @@
             model={chatModel}
             conversationId={chatConversationId}
             initialText={chatPrompt}
-            initialFiles={voiceTextFiles}
+            initialFiles={chatFiles}
             onConversationChange={(id) => chatConversationId = id}
           />
 

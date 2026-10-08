@@ -53,7 +53,8 @@ def test_file_content_part_accepts_matching_data_url_and_utf8_bom():
 @pytest.mark.parametrize(
     ("payload", "error"),
     [
-        ({"filename": "notes.pdf", "file_data": "YQ=="}, "supported text filenames"),
+        ({"filename": "notes.exe", "file_data": "YQ=="}, "unsupported attachment type"),
+        ({"filename": "notes.pdf", "file_data": "YQ=="}, "not a PDF"),
         ({"filename": "../notes.txt", "file_data": "YQ=="}, "filename must be a basename"),
         ({"filename": "notes.txt", "file_data": "%%%"}, "valid base64"),
         ({"filename": "notes.txt", "file_data": "data:text/csv;base64,YQ=="}, "MIME type"),
@@ -84,6 +85,24 @@ def test_file_content_part_accepts_wav_and_mp3(fmt, data, mime_type):
 
 
 @pytest.mark.parametrize(
+    ("filename", "data", "mime_type", "kind"),
+    [
+        ("brief.pdf", b"%PDF-1.7\n", "application/pdf", "file_bytes"),
+        ("report.docx", b"PK\x03\x04demo", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "file_bytes"),
+        ("table.xlsx", b"PK\x03\x04demo", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "file_bytes"),
+        ("slides.pptx", b"PK\x03\x04demo", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "file_bytes"),
+        ("photo.png", b"\x89PNG\r\n\x1a\n" + b"\0" * 16, "image/png", "image_bytes"),
+        ("photo.jpg", b"\xff\xd8\xff\xe0", "image/jpeg", "image_bytes"),
+        ("voice.wav", _wav_bytes(), "audio/wav", "file_bytes"),
+        ("voice.mp3", b"ID3\x04\x00\x00", "audio/mpeg", "file_bytes"),
+    ],
+)
+def test_file_content_part_accepts_supported_multimodal_attachment(filename, data, mime_type, kind):
+    part = file_content_part({"type": "file", "file": {"filename": filename, "file_data": _encoded(data)}})
+    assert (part.kind, part.data, part.mime_type, part.name) == (kind, data, mime_type, filename)
+
+
+@pytest.mark.parametrize(
     ("fmt", "data", "error"),
     [
         ("ogg", b"OggS", "wav or mp3"),
@@ -108,6 +127,13 @@ def test_validate_file_parts_requires_user_role():
 def test_validate_file_parts_counts_images_and_files_together():
     parts = [ContentPart.file_bytes(b"a", "text/plain", "a.txt")]
     parts.extend(ContentPart.image_url(f"https://example.test/{index}.png") for index in range(10))
+
+    with pytest.raises(ValueError, match="at most 10 attachments"):
+        validate_file_parts([Message("user", parts)])
+
+
+def test_validate_file_parts_counts_image_file_attachments():
+    parts = [ContentPart.image_bytes(b"image", "image/png", f"{index}.png") for index in range(11)]
 
     with pytest.raises(ValueError, match="at most 10 attachments"):
         validate_file_parts([Message("user", parts)])

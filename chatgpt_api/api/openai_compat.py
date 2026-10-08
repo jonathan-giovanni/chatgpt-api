@@ -22,6 +22,7 @@ from chatgpt_api.api.admin_store import BridgeAdminStore
 from chatgpt_api.api.config import OpenAICompatConfig
 from chatgpt_api.api.conversation_stream import ConversationStreams, decode_voice_batch
 from chatgpt_api.api.file_inputs import file_content_part, validate_file_parts
+from chatgpt_api.api.voice_attachments import load_voice_attachments, stage_voice_attachments
 from chatgpt_api.api import extension_bridge
 from chatgpt_api.api.http_utils import (
     authorize as _authorize,
@@ -1242,6 +1243,16 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             if path == "/v1/models":
                 _send_json(self, 200, _models_response(config))
                 return
+            attachment_batch = re.fullmatch(r"/v1/chatgpt/voice/attachments/(sa_[a-f0-9]{32})", path)
+            if attachment_batch:
+                try:
+                    result = load_voice_attachments(
+                        config.image_output_dir.parent / "sip-attachments", attachment_batch.group(1)
+                    )
+                    _send_json(self, 200, result)
+                except (ValueError, OSError) as exc:
+                    _send_json(self, 404, {"error": {"message": str(exc), "type": "not_found"}})
+                return
             conversation_match = re.fullmatch(r"/v1/chatgpt/conversations/([^/]+)/(messages|events)", path)
             if conversation_match:
                 requested_account = (query.get("account") or [""])[-1].strip() or None
@@ -1329,6 +1340,18 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
                     _send_json(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
                 return
             if not _authorize(self, config.api_key):
+                return
+            if path == "/v1/chatgpt/voice/attachments":
+                try:
+                    length = int(self.headers.get("content-length", "0") or "0")
+                    if not 0 < length <= 36 * 1024 * 1024:
+                        raise ValueError("attachment request must contain JSON within 36 MiB")
+                    result = stage_voice_attachments(
+                        config.image_output_dir.parent / "sip-attachments", _read_json_body(self)
+                    )
+                    _send_json(self, 200, result)
+                except (ValueError, OSError) as exc:
+                    _send_json(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
                 return
             voice_events_match = re.fullmatch(r"/v1/chatgpt/voice/sessions/(vs_[a-f0-9]{32})/events", path)
             if voice_events_match:
