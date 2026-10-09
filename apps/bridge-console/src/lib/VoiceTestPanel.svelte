@@ -592,7 +592,7 @@
       const files = await readAttachments(initialFiles);
       requestOptions = {
         voice,
-        model: model.trim() || "auto",
+        model: model.trim() || "gpt-6-mini",
         project: projectAlias || undefined,
         conversation_id: conversationId.trim() || undefined,
         text: initialText.trim() || undefined,
@@ -658,7 +658,7 @@
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: model.trim() || "auto",
+            model: model.trim() || "gpt-6-mini",
             conversation_id: conversationId.trim(),
             temporary_chat: false,
             messages: [{ role: "user", content }],
@@ -714,7 +714,7 @@
     </div>
     <div class="rounded-xl border border-white/10 bg-black/20 p-3">
       <span class="text-slate-500">Modelo del mensaje inicial</span>
-      <div class="mt-1 font-bold text-slate-200">{model || "auto"}</div>
+      <div class="mt-1 font-bold text-slate-200">{model || "gpt-6-mini"}</div>
     </div>
     <div class="rounded-xl border border-white/10 bg-black/20 p-3">
       <span class="text-slate-500">Conversación</span>

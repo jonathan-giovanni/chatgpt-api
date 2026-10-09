@@ -12,6 +12,8 @@ import re
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +55,9 @@ from chatgpt_api.api.prompts import (
     TOOL_BRIDGE_PROMPT,
 )
 from chatgpt_api.core.errors import ProviderError
+from chatgpt_api.core.request_metrics import (
+    current_metrics, emit_metrics, metric_facts, metric_mark, metric_span, request_metrics, timed,
+)
 from chatgpt_api.core.types import ChatRequest, ContentPart, ImageRequest, ImageResponse, Message
 from chatgpt_api.providers.chatgpt.account_info import detect_account_info, infer_account_capabilities, load_settings_file
 from chatgpt_api.providers.chatgpt.accounts import (
@@ -72,7 +77,8 @@ from chatgpt_api.providers.chatgpt.projects import (
     validate_project_mapping,
 )
 from chatgpt_api.providers.chatgpt.conversation_history import conversation_timeline
-from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport
+from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport, normalize_impersonate_profile
+from chatgpt_api.providers.chatgpt.preparation import chat_policy
 from chatgpt_api.providers.chatgpt.voice import (
     VoiceSignallingError, bind_conversation, bound_session, negotiate_voice, release_session,
 )
@@ -89,6 +95,19 @@ class _DownloadFile:
 
 _DOWNLOAD_FILES: dict[str, _DownloadFile] = {}
 _DOWNLOAD_FILES_LOCK = threading.Lock()
+_REQUEST_STORES: ContextVar[dict[Path, BridgeAdminStore] | None] = ContextVar("request_admin_stores", default=None)
+_REQUEST_LIMITS: ContextVar[dict[tuple[OpenAICompatConfig, str, str], int] | None] = ContextVar("request_feature_limits", default=None)
+
+
+@contextmanager
+def _admin_store_scope():
+    token = _REQUEST_STORES.set({})
+    limits_token = _REQUEST_LIMITS.set({})
+    try:
+        yield
+    finally:
+        _REQUEST_STORES.reset(token)
+        _REQUEST_LIMITS.reset(limits_token)
 
 
 class AccountRouter:
@@ -318,6 +337,7 @@ def _configure_account_limits(config: OpenAICompatConfig, router: AccountRouter)
         router.set_account_limit(account, _account_concurrency_limit(config, account))
 
 
+@timed("local.account_routing")
 def _router_for_request(
     config: OpenAICompatConfig,
     default_router: AccountRouter | None,
@@ -379,6 +399,7 @@ def _default_bridge_settings() -> dict[str, Any]:
     }
 
 
+@timed("local.bridge_settings")
 def _bridge_settings(config: OpenAICompatConfig) -> dict[str, Any]:
     stored = _admin_store(config).get_setting(BRIDGE_SETTINGS_KEY, {})
     settings = _normalize_bridge_settings(stored)
@@ -459,6 +480,17 @@ def _parse_concurrency_override(value: str | None) -> dict[str, int]:
 
 
 def _feature_account_concurrency_limit(config: OpenAICompatConfig, feature: str, account: str) -> int:
+    limits = _REQUEST_LIMITS.get()
+    key = (config, feature, account)
+    if limits is not None and key in limits:
+        return limits[key]
+    limit = _read_feature_account_concurrency_limit(config, feature, account)
+    if limits is not None:
+        limits[key] = limit
+    return limit
+
+
+def _read_feature_account_concurrency_limit(config: OpenAICompatConfig, feature: str, account: str) -> int:
     settings = _bridge_settings(config)
     feature_settings = settings.get("concurrency", {}).get(feature, {})
     accounts = feature_settings.get("accounts") if isinstance(feature_settings, dict) else {}
@@ -545,6 +577,7 @@ def _finish_chatgpt_operation(operation_id: str | None) -> None:
     _update_chatgpt_operation(operation_id, completed=True)
 
 
+@timed("local.finalize_conversation")
 async def _finalize_conversation_session(
     config: OpenAICompatConfig,
     operation: _ChatGPTOperation,
@@ -688,7 +721,8 @@ async def _with_provider_account_limit(provider: ChatGPTProvider, operation: Any
     if not isinstance(account, str) or not account:
         return await operation()
     limiter = _global_account_limiter(account)
-    await asyncio.to_thread(limiter.acquire)
+    with metric_span("queue.account"):
+        await asyncio.to_thread(limiter.acquire)
     try:
         return await operation()
     finally:
@@ -704,11 +738,13 @@ async def _with_provider_feature_limit(
     account = getattr(provider, "_chatgpt_api_account", None)
     if not isinstance(account, str) or not account:
         return await operation()
-    limit = _feature_account_concurrency_limit(config, feature, account)
+    with metric_span("local.feature_settings"):
+        limit = _feature_account_concurrency_limit(config, feature, account)
     if limit <= 0:
         raise ProviderError(f"ChatGPT {feature} is disabled for account '{account}' by bridge concurrency settings")
     limiter = _feature_limiter(feature, account, limit)
-    await asyncio.to_thread(limiter.acquire)
+    with metric_span(f"queue.{feature}"):
+        await asyncio.to_thread(limiter.acquire)
     try:
         return await operation()
     finally:
@@ -736,6 +772,7 @@ async def _with_provider_feature_limits(
     return await run(0)
 
 
+@timed("local.model_account_selection")
 def _account_order_for_model(
     config: OpenAICompatConfig,
     router: AccountRouter,
@@ -743,7 +780,7 @@ def _account_order_for_model(
     thinking_effort: str | None,
 ) -> tuple[str, ...]:
     ordered = router.order()
-    if model_slug == "auto":
+    if model_slug == "auto" or len(ordered) == 1:
         return ordered
     supported: list[str] = []
     unknown: list[str] = []
@@ -879,7 +916,7 @@ async def _start_voice_session(
     project = body.get("project")
     if project is None:
         project = body.get("chatgpt_project")
-    model = body.get("model", "auto")
+    model = body.get("model", "auto" if bridge_id else config.default_model)
     if not isinstance(model, str) or not model or model in DEEP_RESEARCH_MODEL_ALIASES or model == "gpt-image-1":
         raise ValueError("model must be an ordinary ChatGPT model")
     model_slug, _ = _resolve_model_alias(model, None)
@@ -1310,6 +1347,29 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             _send_json(self, 404, {"error": {"message": "not found", "type": "not_found"}})
 
         def do_POST(self) -> None:  # noqa: N802
+            enabled = (
+                urlparse(self.path).path == "/v1/chat/completions"
+                and os.environ.get("CHATGPT_REQUEST_METRICS", "").lower() in {"1", "true", "yes", "on"}
+            )
+            with request_metrics(enabled) as trace:
+                self._metrics_status = None
+                try:
+                    self._do_POST()
+                finally:
+                    if trace is not None:
+                        emit_metrics(trace, self._metrics_status)
+
+        def send_response(self, code: int, message: str | None = None) -> None:
+            self._metrics_status = code
+            super().send_response(code, message)
+
+        def end_headers(self) -> None:
+            trace = current_metrics()
+            if trace is not None:
+                self.send_header("X-Request-Id", trace.request_id)
+            super().end_headers()
+
+        def _do_POST(self) -> None:
             path = urlparse(self.path).path
             if path in {"/v1/chatgpt/extension/activate", "/v1/chatgpt/extension/health", "/v1/chatgpt/extension/sync", "/v1/chatgpt/extension/report"}:
                 try:
@@ -1407,7 +1467,9 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
                 _send_json(self, 404, {"error": {"message": "not found", "type": "not_found"}})
                 return
             try:
-                body = _read_json_body(self)
+                with metric_span("local.request_parse"):
+                    body = _read_json_body(self)
+                metric_facts(streaming=bool(body.get("stream")))
                 if path == "/v1/chat/completions":
                     header_project = _str_or_none(self.headers.get("X-ChatGPT-Project"))
                     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
@@ -1433,7 +1495,9 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             except ValueError as exc:
                 _send_json(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
                 return
-            _send_json(self, 200, response)
+            with metric_span("local.response_delivery"):
+                _send_json(self, 200, response)
+            metric_mark("client_complete")
 
         def log_message(self, format: str, *args: Any) -> None:
             return
@@ -1446,10 +1510,11 @@ async def _chat_completion(
     body: dict[str, Any],
     router: AccountRouter | None = None,
 ) -> dict[str, Any]:
-    _hydrate_conversation_request(config, body)
-    mapping = _resolve_project_request(config, body)
-    with project_context(mapping.project_id if mapping else None):
-        response = await _chat_completion_with_project(config, body, router)
+    with _admin_store_scope(), chat_policy(body):
+        _hydrate_conversation_request(config, body)
+        mapping = _resolve_project_request(config, body)
+        with project_context(mapping.project_id if mapping else None):
+            response = await _chat_completion_with_project(config, body, router)
     if mapping:
         response["chatgpt_project"] = {
             "alias": mapping.alias,
@@ -1468,7 +1533,7 @@ async def _chat_completion_with_project(
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
-    requested_model = _str_or_none(body.get("model")) or "auto"
+    requested_model = _str_or_none(body.get("model")) or config.default_model
     model, model_agent_mode = _split_model_agent_mode(requested_model)
     agent_prompt_mode = _resolve_agent_prompt_mode(config, body, model_agent_mode)
     model_slug, thinking_effort = _resolve_model_alias(model, _str_or_none(body.get("thinking_effort")))
@@ -1703,10 +1768,11 @@ async def _chat_completion_stream(
     router: AccountRouter,
     handler: BaseHTTPRequestHandler,
 ) -> None:
-    _hydrate_conversation_request(config, body)
-    mapping = _resolve_project_request(config, body)
-    with project_context(mapping.project_id if mapping else None):
-        await _chat_completion_stream_with_project(config, body, router, handler, mapping)
+    with _admin_store_scope(), chat_policy(body):
+        _hydrate_conversation_request(config, body)
+        mapping = _resolve_project_request(config, body)
+        with project_context(mapping.project_id if mapping else None):
+            await _chat_completion_stream_with_project(config, body, router, handler, mapping)
 
 
 async def _chat_completion_stream_with_project(
@@ -1719,7 +1785,7 @@ async def _chat_completion_stream_with_project(
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
-    requested_model = _str_or_none(body.get("model")) or "auto"
+    requested_model = _str_or_none(body.get("model")) or config.default_model
     model, model_agent_mode = _split_model_agent_mode(requested_model)
     agent_prompt_mode = _resolve_agent_prompt_mode(config, body, model_agent_mode)
     model_slug, thinking_effort = _resolve_model_alias(model, _str_or_none(body.get("thinking_effort")))
@@ -1838,6 +1904,7 @@ async def _chat_completion_stream_with_project(
         _write_sse_finish(handler, chunk_base, "stop")
     except ProviderError as exc:
         status, payload = _provider_error_status_and_payload(exc)
+        metric_facts(provider_failed=True)
         message = payload.get("error", {}).get("message") if isinstance(payload.get("error"), dict) else str(exc)
         _write_sse_content(handler, chunk_base, f"ChatGPT provider error ({status}): {message}")
         _write_sse_finish(handler, chunk_base, "stop")
@@ -1969,7 +2036,8 @@ async def _stream_messages_text_with_accounts(
         except ProviderError as exc:
             if chunks:
                 raise
-            init_metadata = init_metadata or await _conversation_init_metadata(provider, model_slug)
+            init_metadata = init_metadata or ({} if getattr(exc, "upstream_error_code", None)
+                                             else await _conversation_init_metadata(provider, model_slug))
             compat_error = OpenAICompatProviderError(
                 exc,
                 requested_model,
@@ -2932,6 +3000,7 @@ def _admin_status_response(config: OpenAICompatConfig, router: AccountRouter) ->
             },
             "agent_prompt_mode": _normalize_agent_prompt_mode(config.agent_prompt_mode),
             "model_fallback": config.model_fallback or "none",
+            "default_model": config.default_model,
             "temporary_chat": config.temporary_chat,
         },
         "settings": _bridge_settings(config),
@@ -3072,6 +3141,7 @@ def _conversation_id_from_body(body: dict[str, Any]) -> str | None:
     return conversation_id
 
 
+@timed("local.conversation_lookup")
 def _hydrate_conversation_request(config: OpenAICompatConfig, body: dict[str, Any]) -> dict[str, Any] | None:
     conversation_id = _conversation_id_from_body(body)
     if not conversation_id:
@@ -3127,6 +3197,7 @@ def _validate_conversation_request(
     return conversation_id, parent_message_id
 
 
+@timed("local.project_lookup")
 def _resolve_project_request(config: OpenAICompatConfig, body: dict[str, Any]) -> ProjectMapping | None:
     reference = _project_reference_from_body(body)
     if not reference:
@@ -3185,7 +3256,7 @@ async def _admin_post_response(
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         test_body = {
-            "model": _str_or_none(body.get("model")) or "auto",
+            "model": _str_or_none(body.get("model")) or config.default_model,
             "messages": messages,
             "stream": False,
             "metadata": {"source": "bridge_console_test_chat"},
@@ -3672,7 +3743,15 @@ def _admin_db_path(config: OpenAICompatConfig) -> Path:
 
 
 def _admin_store(config: OpenAICompatConfig) -> BridgeAdminStore:
-    return BridgeAdminStore(_admin_db_path(config))
+    path = _admin_db_path(config)
+    stores = _REQUEST_STORES.get()
+    if stores is not None and path in stores:
+        return stores[path]
+    with metric_span("local.admin_store_initialize"):
+        store = BridgeAdminStore(path)
+    if stores is not None:
+        stores[path] = store
+    return store
 
 
 def _project_root() -> Path:
@@ -3808,7 +3887,8 @@ async def _collect_messages_text_with_accounts(
                 ),
             )
         except ProviderError as exc:
-            init_metadata = init_metadata or await _conversation_init_metadata(provider, model_slug)
+            init_metadata = init_metadata or ({} if getattr(exc, "upstream_error_code", None)
+                                             else await _conversation_init_metadata(provider, model_slug))
             compat_error = OpenAICompatProviderError(
                 exc,
                 requested_model,
@@ -4656,7 +4736,7 @@ def _classify_provider_error(message: str, provider_status: int | None) -> tuple
             401,
             "Refresh the account capture/cookies, then retry.",
         )
-    if provider_status == 429 or any(keyword in normalized for keyword in ("rate limit", "too many", "quota")):
+    if provider_status == 429 or any(keyword in normalized for keyword in ("rate limit", "too many", "quota", "usage_limit")):
         return (
             "chatgpt_rate_limited",
             "provider_rate_limit",
@@ -4771,9 +4851,6 @@ def _matching_model_limit(
             continue
         if item.get("model_slug") in candidates or item.get("using_default_model_slug") in candidates:
             return item
-    for item in model_limits:
-        if isinstance(item, dict):
-            return item
     return None
 
 
@@ -4795,6 +4872,7 @@ def _provider_error_message(
     return f"ChatGPT Web request failed{model_text}.{status_text} {hint}{init_text} Raw error: {raw_message}"
 
 
+@timed("local.capture_load_provider")
 def _provider_for_account(
     config: OpenAICompatConfig,
     account: str | None = None,
@@ -4824,15 +4902,15 @@ def _provider_for_account(
 
 
 def _impersonate_for_capture(configured: str | None, capture: CapturedRequest) -> str:
-    selected = (configured or "").strip()
-    if selected and selected.lower() not in {"auto", "default", "safari18_4", "safari18_0"}:
+    selected = normalize_impersonate_profile(configured or "")
+    if selected and selected.lower() not in {"auto", "default", "safari184", "safari180"}:
         return selected
     user_agent = (capture.headers.get("user-agent") or "").lower()
     if "chrome/" in user_agent or "chromium/" in user_agent:
         return "chrome"
     if "firefox/" in user_agent:
         return "firefox135"
-    return selected or "safari18_4"
+    return selected if selected and selected.lower() not in {"auto", "default"} else "safari184"
 
 
 async def _maybe_handle_local_chatgpt_command(
@@ -5133,6 +5211,12 @@ def _models_for_config(config: OpenAICompatConfig) -> list[dict[str, Any]]:
     for account in _accounts_for_config(config):
         for model in _models_for_account(config, account):
             merged.setdefault(model["id"], model)
+    if config.default_model not in merged:
+        merged[config.default_model] = {
+            "id": config.default_model,
+            "name": config.default_model,
+            "chatgpt": {"provider_model": config.default_model, "mode": "standard", "source": "configured"},
+        }
     merged.setdefault("gpt-image-1", {"id": "gpt-image-1", "name": "ChatGPT Image"})
     merged.setdefault("chatgpt-deep-research", {"id": "chatgpt-deep-research", "name": "ChatGPT Deep Research"})
     return list(merged.values())
@@ -6246,6 +6330,8 @@ def _write_sse_content(handler: BaseHTTPRequestHandler, chunk_base: dict[str, An
             "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
         },
     )
+    metric_mark("client_first_text")
+    metric_mark("client_last_text", first=False)
 
 
 def _write_sse_tool_calls(
@@ -6287,6 +6373,7 @@ def _write_sse_finish(handler: BaseHTTPRequestHandler, chunk_base: dict[str, Any
         if _is_client_disconnect_error(exc):
             raise _ClientDisconnected() from exc
         pass
+    metric_mark("client_complete")
 
 
 def _write_sse(handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> None:

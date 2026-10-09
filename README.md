@@ -142,6 +142,7 @@ Recent project updates include:
 - **Chrome account connector:** a Manifest V3 extension checks localhost before an optional LAN IP, automatically links a matching existing account from a normal Chrome ChatGPT session, and refreshes its encrypted capture. Its pulse icon shows health and toggles automatic renewal two days before expiry; the dashboard header reflects account status. See [Chrome connector](docs/CHROME_EXTENSION.md) for setup and limits.
 
 - **Model discovery and Project routing:** modernizes model metadata and lets new chats target an optional ChatGPT Project.
+- **Chat latency:** fresh prepare/requirements calls run in parallel by default; the conversation stream keeps its existing transport. Test Lab shows ordinary text as SSE chunks arrive and reports first-text and total time. SQLite skips repeated schema work and closes connections explicitly. Private timing logs separate first text, upstream completion, and local cleanup. Ordinary chat defaults to the lightweight `gpt-6-mini`; explicit models, including `auto`, remain available. Unhelpful caching and pooling experiments were removed. See [request metrics](docs/REQUEST_METRICS.md).
 - **Chat and SIP voice attachments:** accepts bounded text, PDF, Office, image, and WAV/MP3 files. The SIP/RTP panel stages a selected list locally and sends it with the initial conversation request. Audio files sent this way are generic attachments and do not guarantee transcription.
 - **Conversation continuity:** returns a conversation UUID and accepts it on later requests to continue the same ChatGPT conversation, preserving its account and Project routing.
 - **Conversation text timeline and stream:** loads the visible history once by UUID, then updates user/assistant messages and timestamps from actual WebRTC or SIP data channel events. The dashboard listens over SSE, reconnects with a cached snapshot, and never polls ChatGPT for live text. Manual **Actualizar** reloads history. Audio without upstream transcription is reported separately.
@@ -162,6 +163,56 @@ linked account, its quota, and private Web interfaces.
 | Docker builds and runtime | API, Console, and SIP gateway images built; API healthy; Console served on `:8080` | Local packaging and startup. |
 | Authenticated attachment staging | Mixed TXT/PDF/PNG/MP3 synthetic files staged over local HTTP and fetched from the SIP container | Batch transport, limits, and gateway retrieval. This does **not** prove that every format is processed by upstream ChatGPT in a real call. |
 | SIP request/reconnect tests | Initial offer contains files, text, Project, model, and UUID; reconnect does not replay files | Local request shape and idempotent reconnect behavior. |
+
+The final chat optimization revision was checked on **2026-10-09**:
+
+| Check | Result | What it establishes |
+| --- | --- | --- |
+| Python suite in Linux Docker | `357 passed` | Includes preparation, model defaults, stream termination, conversation continuity and SQLite migration/cleanup. |
+| Console SSE parser | `15 passed` (`npm test`, Node 24) | Live deltas, fragmented UTF-8/CRLF, complete termination and cancellation on errors. |
+| Console diagnostics and production build | `0 errors, 0 warnings`; Vite build passed | Text streaming and first-text/total timings compile without new dependencies. |
+| Live Console SSE check | New chat and continuation both completed on the same UUID | First-text/total: 7,528/10,463 ms initially, 1,646/2,662 ms on continuation. This single smoke check verifies delivery and continuity, not a causal latency improvement. |
+
+On **2026-10-09**, 112 additional `gpt-6-mini` follow-ups completed successfully
+on 10 existing UUIDs: 24 warmups and 88 comparisons. Two 40-request comparisons
+produced the following means; 12 additional requests checked stream framing:
+
+| Discarded experiment | First text, control → variant | Full response, control → variant | Observed full-response change |
+| --- | ---: | ---: | --- |
+| HTTP pooling plus callback streaming | 3,818 → 3,812 ms | 6,197 → 6,887 ms | 11.13% higher |
+| Pooling only prepare/requirements | 3,757 → 4,422 ms | 5,933 → 6,881 ms | 15.98% higher |
+
+Neither established faster replies, so both pooling paths and callback
+streaming were removed. These differences do not establish that pooling caused
+the delay; upstream variability remained high. Fresh parallel preparation,
+SQLite improvements and the existing conversation stream remain. The earlier
+100-response comparison observed 28.2% less mean preparation time with parallel
+calls, but no overall reply-time improvement. See [timing validation and
+limits](docs/REQUEST_METRICS.md#validation-and-discarded-experiments-2026-10-09).
+Private inputs, identifiers and traces stay outside Git.
+
+Local SQLite work was also compared using **100 paired synthetic runs**, after
+10 warmup pairs, in Docker with a Windows bind-mounted database:
+
+| Local operation | Mean before → after | Median before → after | Mean reduction |
+| --- | ---: | ---: | ---: |
+| Store initialization plus one settings read | 37.670 → 24.872 ms | 35.774 → 24.936 ms | 33.97% (12.798 ms) |
+| Store initialization alone | 31.306 → 14.709 ms | 29.192 → 14.780 ms | 53.02% (16.597 ms) |
+
+These timings measure local database work, not a full ChatGPT request. Garbage
+collection ran outside the timed spans; the old path deferred connection
+cleanup, while the new path closes it explicitly. The individual settings read
+became slower, but initialization plus that read became faster. No overall
+reply-time improvement is claimed from this test.
+
+Test Lab now streams ordinary text without attachments through the existing
+SSE API. It renders deltas as they arrive, keeps Project and conversation UUID
+continuity, and displays first-text and total elapsed time. In the latest
+fresh-session control group above, first text arrived at 3,757 ms and completion
+at 5,933 ms on average: a 2.18 s window in which streaming can already show text
+instead of waiting for the complete JSON response. This changes delivery and
+visibility, not ChatGPT's generation speed. Requests with attachments retain
+their existing JSON flow.
 
 Earlier **live** checks remain useful but were run against previous revisions:
 
@@ -661,6 +712,13 @@ select that name in **Test Lab** or send it as `chatgpt_project`; the bridge
 resolves the private Project ID and its linked account locally. Leave the field
 out to create a conversation outside Projects. You may also specify `model` and
 attach supported files to the first message.
+
+Ordinary chat uses `gpt-6-mini` when `model` is omitted. Configure another
+default with `CHATGPT_DEFAULT_MODEL` or server `--default-model`; an explicit
+`model`, including `auto`, takes precedence. Check `/v1/models` for account
+support. This is a lightweight default validated locally, not a guarantee that
+it is the fastest option for every workload. ChatGPT still chooses the live
+voice model automatically.
 
 ```json
 {
@@ -1305,6 +1363,13 @@ bun run build
 
 Docker serves the built console through nginx on port `8080`.
 
+In Test Lab, ordinary text requests without attachments use `stream: true`.
+Text appears progressively, with separate first-text and total timers. Keep the
+returned UUID in the conversation field to continue the same thread; the
+selected Project remains associated with it. The SSE reader consumes the
+response through EOF and handles `[DONE]` without truncating text. Attachment
+requests continue to use the existing JSON response path.
+
 ## Character Game Use Case
 
 The character game is a separate app server that calls the bridge. It is meant
@@ -1577,6 +1642,9 @@ Common environment variables:
 | `CHATGPT_RESEARCH_OUTPUT_DIR` | `./outputs/chatgpt-research` | Deep Research report directory. |
 | `CHATGPT_ADMIN_DB_PATH` | `./outputs/chatgpt-admin.sqlite` | Console/admin SQLite metadata. |
 | `CHATGPT_AGENT_MODE` | `optimized` | Tool bridge prompt mode. |
+| `CHATGPT_DEFAULT_MODEL` | `gpt-6-mini` | Lightweight ordinary-chat default when `model` is omitted; explicit model/`auto` takes precedence. Account support is required. |
+| `CHATGPT_PARALLEL_PREPARATION` | `true` | Run fresh prepare/requirements HTTP calls concurrently. |
+| `CHATGPT_REQUEST_METRICS` | `false` | Write content-free latency spans, status codes, counts, and completion marks; returns `X-Request-Id` for trace correlation. |
 | `CHATGPT_MODEL_FALLBACK` | `auto` | Fallback model after recoverable model errors. |
 | `CHATGPT_TEMPORARY_CHAT` | `true` | Use temporary ChatGPT chats for normal chat completions. |
 | `CHATGPT_WEB_TIMEOUT` | `5400` | Provider timeout in seconds; long enough for Deep Research. |
@@ -1666,6 +1734,7 @@ integrations/
 
 scripts/
   sip_rtp_smoke.py      Local SIP/UDP and RTP/PCMU smoke test.
+  benchmark_chat_preparation.py Fresh sequential/parallel preparation comparison.
 
 docs/
   ACCOUNT_CAPTURE.md    Browser capture guide.
@@ -1684,6 +1753,20 @@ outputs/                Generated images, research reports, and SQLite metadata.
 ```
 
 ## Verification
+
+For request latency, enable `CHATGPT_REQUEST_METRICS=true` in the private
+environment. The API writes content-free JSON timings and returns
+`X-Request-Id`; the live benchmark compares initial chats with UUID
+continuations. The transport also measures message completion and HTTP cleanup,
+stops parsing at `[DONE]`, and keeps its working `stream=True` transport with
+explicit response cleanup. SQLite schema checks and request-local concurrency reads avoid
+repeated work. Parallel preparation preserves fresh session validation on
+every turn; requirements/proof caching was removed after the live comparison
+showed no eligible cache hits. HTTP pooling and callback experiments were also
+removed because they did not establish faster replies. The paired benchmark
+compares fresh sequential and parallel preparation; no universal latency gain
+is assumed.
+See [request timing logs, controls, and paired benchmarks](docs/REQUEST_METRICS.md).
 
 Python:
 
@@ -1813,6 +1896,7 @@ opencode does not use the bridge
 
 - [Account capture guide](docs/ACCOUNT_CAPTURE.md)
 - [Chrome connector setup and renewal](docs/CHROME_EXTENSION.md)
+- [Request timing logs and live benchmark](docs/REQUEST_METRICS.md)
 - [CLI guide](docs/CLI.md)
 - [Docker guide](docs/DOCKER.md)
 - [OpenAI-shaped API guide](docs/OPENAI_COMPATIBILITY.md)

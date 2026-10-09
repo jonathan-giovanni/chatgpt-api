@@ -6,6 +6,7 @@ This file is deliberately provider-specific. Core code should not import it.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import re
 import struct
@@ -13,18 +14,32 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from chatgpt_api.core.errors import ProviderError, ProviderNotConfigured, ProviderNotReady
+from chatgpt_api.core.request_metrics import metric_facts, metric_increment, metric_mark, metric_span, timed
 from chatgpt_api.core.types import ChatDelta, ChatRequest, ImageAsset, ImageInput, ImageRequest, ImageResponse
 from chatgpt_api.providers.chatgpt.auth import ChatGPTAuthConfig
 from chatgpt_api.providers.chatgpt.proof import decode_proof_config, generate_proof_token
 from chatgpt_api.providers.chatgpt.projects import conversation_mode, current_project_id
+from chatgpt_api.providers.chatgpt.preparation import parallel_preparation_enabled
 from chatgpt_api.providers.chatgpt.timezone import local_timezone_payload
 
 MAX_CHATGPT_INPUT_IMAGES = 10
+
+
+def normalize_impersonate_profile(profile: str) -> str:
+    """Keep saved legacy Safari names compatible with canonical curl profiles."""
+    selected = profile.strip()
+    return {
+        "safari18_4": "safari184",
+        "safari18_4_ios": "safari184_ios",
+        "safari18_0": "safari180",
+        "safari18_0_ios": "safari180_ios",
+    }.get(selected.lower(), selected)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +69,12 @@ class DeepResearchResult:
     metadata: dict[str, Any]
 
 
+class ChatGPTStreamError(ProviderError):
+    def __init__(self, code: Any) -> None:
+        self.upstream_error_code = code if isinstance(code, str) and re.fullmatch(r"[a-z_]{2,64}", code) else "upstream_error"
+        super().__init__(f"ChatGPT conversation stream reported {self.upstream_error_code}")
+
+
 class ChatGPTWebTransport:
     """Owns ChatGPT Web HTTP details.
 
@@ -68,13 +89,13 @@ class ChatGPTWebTransport:
         endpoints: ChatGPTEndpoints | None = None,
         timeout: float = 180.0,
         refresh_web_tokens: bool = True,
-        impersonate: str = "safari18_4",
+        impersonate: str = "safari184",
     ) -> None:
         self.auth = auth
         self.endpoints = endpoints or ChatGPTEndpoints()
         self.timeout = timeout
         self.refresh_web_tokens = refresh_web_tokens
-        self.impersonate = impersonate
+        self.impersonate = normalize_impersonate_profile(impersonate)
 
     def ensure_configured(self) -> None:
         if not self.auth.access_token:
@@ -83,6 +104,10 @@ class ChatGPTWebTransport:
             )
 
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[ChatDelta]:
+        metric_increment("provider_attempts")
+        metric_facts(continuation=bool(request.conversation_id), project=bool(current_project_id()),
+                     thinking_effort_configured=bool(request.thinking_effort),
+                     input_messages=len(request.messages))
         self.ensure_configured()
         headers = self.auth.request_headers()
         payload = await asyncio.to_thread(self._build_chat_payload_with_uploaded_media, request, headers)
@@ -94,6 +119,10 @@ class ChatGPTWebTransport:
         async for event in self._stream_conversation_events(conversation_url, headers, payload):
             delta = _event_to_delta(event)
             if delta is not None:
+                if delta.text:
+                    metric_mark("provider_first_text")
+                    metric_mark("provider_last_text", first=False)
+                    metric_increment("output_chars", len(delta.text))
                 yield delta
 
     async def deep_research(self, request: ChatRequest) -> DeepResearchResult:
@@ -155,6 +184,7 @@ class ChatGPTWebTransport:
             payload.setdefault("client_prepare_state", "none")
         return payload
 
+    @timed("local.payload_and_uploads")
     def _build_chat_payload_with_uploaded_media(
         self,
         request: ChatRequest,
@@ -200,6 +230,7 @@ class ChatGPTWebTransport:
             )
         return uploaded_files
 
+    @timed("upstream.conversation_init")
     def conversation_init(
         self,
         requested_default_model: str | None = None,
@@ -239,6 +270,7 @@ class ChatGPTWebTransport:
             return current_node
         return _latest_message_id_from_value(payload)
 
+    @timed("upstream.conversation_snapshot")
     def conversation_snapshot(self, conversation_id: str) -> dict[str, Any] | None:
         """Read a conversation without sending a new message to ChatGPT."""
         self.ensure_configured()
@@ -569,6 +601,7 @@ class ChatGPTWebTransport:
             raw={"asset_pointer": asset_pointer, "metadata_url": metadata_url},
         )
 
+    @timed("session.prepare_requirements_proof")
     def _refresh_web_tokens(self, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, str]:
         try:
             from curl_cffi import requests
@@ -577,46 +610,63 @@ class ChatGPTWebTransport:
 
         refreshed = dict(headers)
         refresh_timeout = min(float(self.timeout), 30.0)
-        prepare_response = requests.post(
-            self.endpoints.prepare_url,
-            headers=_json_headers_for_token_refresh(headers),
-            data=json.dumps(_prepare_payload(payload), separators=(",", ":")).encode("utf-8"),
-            impersonate=self.impersonate,
-            timeout=refresh_timeout,
-        )
+        prepare_data = json.dumps(_prepare_payload(payload), separators=(",", ":")).encode("utf-8")
+
+        def post_token(url: str, data: bytes, phase: str) -> Any:
+            with metric_span(phase) as span:
+                response = requests.post(url, headers=_json_headers_for_token_refresh(headers), data=data,
+                                         impersonate=self.impersonate, timeout=refresh_timeout)
+                try:
+                    if span is not None:
+                        span["status"] = response.status_code
+                    return response
+                finally:
+                    response.close()
+
+        parallel = parallel_preparation_enabled()
+        metric_facts(parallel_preparation=parallel)
+        requirements_response = None
+        if parallel:
+            context = contextvars.copy_context()
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(context.run, post_token, self.endpoints.requirements_url,
+                                         b'{"p":null}', "upstream.requirements")
+                prepare_response = post_token(self.endpoints.prepare_url, prepare_data, "upstream.prepare")
+                requirements_response = future.result()
+        else:
+            prepare_response = post_token(self.endpoints.prepare_url, prepare_data, "upstream.prepare")
         if prepare_response.status_code >= 400:
             raise ProviderError(f"ChatGPT prepare failed: {prepare_response.status_code} {_body_preview(prepare_response)}")
         prepare_json = _json_response(prepare_response)
         conduit_token = prepare_json.get("conduit_token") or prepare_response.headers.get("x-conduit-token")
         if conduit_token:
             refreshed["x-conduit-token"] = conduit_token
-
-        requirements_response = requests.post(
-            self.endpoints.requirements_url,
-            headers=_json_headers_for_token_refresh(headers),
-            data=b'{"p":null}',
-            impersonate=self.impersonate,
-            timeout=refresh_timeout,
-        )
+        if requirements_response is None:
+            requirements_response = post_token(self.endpoints.requirements_url, b'{"p":null}', "upstream.requirements")
         if requirements_response.status_code >= 400:
             raise ProviderError(
                 f"ChatGPT requirements failed: {requirements_response.status_code} {_body_preview(requirements_response)}"
             )
         requirements_json = _json_response(requirements_response)
+        metric_facts(requirements_has_token=bool(requirements_json.get("token")),
+                     requirements_interactive_challenge=any(isinstance(requirements_json.get(name), dict)
+                         and bool(requirements_json[name].get("required")) for name in ("arkose", "turnstile", "captcha")))
         requirements_token = requirements_json.get("token")
         if requirements_token:
             refreshed["openai-sentinel-chat-requirements-token"] = requirements_token
 
         proof_challenge = requirements_json.get("proofofwork")
+        metric_facts(proof_required=bool(isinstance(proof_challenge, dict) and proof_challenge.get("required")))
         if isinstance(proof_challenge, dict) and proof_challenge.get("required"):
             proof_config = decode_proof_config(headers.get("openai-sentinel-proof-token"))
-            proof_token = generate_proof_token(
-                required=True,
-                seed=str(proof_challenge.get("seed") or ""),
-                difficulty=str(proof_challenge.get("difficulty") or ""),
-                user_agent=headers.get("user-agent"),
-                proof_config=proof_config,
-            )
+            with metric_span("local.proof_of_work"):
+                proof_token = generate_proof_token(
+                    required=True,
+                    seed=str(proof_challenge.get("seed") or ""),
+                    difficulty=str(proof_challenge.get("difficulty") or ""),
+                    user_agent=headers.get("user-agent"),
+                    proof_config=proof_config,
+                )
             if proof_token:
                 refreshed["openai-sentinel-proof-token"] = proof_token
         return refreshed
@@ -642,31 +692,57 @@ class ChatGPTWebTransport:
         except ImportError as exc:
             raise ProviderNotConfigured("curl_cffi is required for ChatGPT Web transport") from exc
 
-        response = requests.post(
-            conversation_url,
-            headers=_conversation_headers(headers),
-            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-            impersonate=self.impersonate,
-            timeout=self.timeout,
-            stream=True,
-        )
-        if response.status_code >= 400:
-            raise ProviderError(f"ChatGPT conversation failed: {response.status_code} {_body_preview(response)}")
-
-        events: list[dict[str, Any]] = []
-        for raw_line in response.iter_lines():
-            line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
-            if not line.startswith("data: "):
-                continue
-            payload_text = line[6:].strip()
-            if not payload_text or payload_text == "[DONE]":
-                continue
-            try:
-                event = json.loads(payload_text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict):
-                yield event
+        encoded_payload = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        metric_facts(upstream_payload_bytes=len(encoded_payload), system_hints_count=len(payload.get("system_hints") or []))
+        metric_mark("upstream_conversation_send", first=False)
+        with metric_span("upstream.conversation_headers") as span:
+            response = requests.post(
+                conversation_url,
+                headers=_conversation_headers(headers),
+                data=encoded_payload,
+                impersonate=self.impersonate,
+                timeout=self.timeout,
+                stream=True,
+            )
+            if span is not None:
+                span["status"] = response.status_code
+        metric_mark("upstream_headers", first=False)
+        try:
+            if response.status_code >= 400:
+                error = f"ChatGPT conversation failed: {response.status_code} {_body_preview(response)}"
+                raise ProviderError(error)
+            for raw_line in response.iter_lines():
+                line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+                if not line.startswith("data: "):
+                    continue
+                payload_text = line[6:].strip()
+                if payload_text == "[DONE]":
+                    metric_mark("upstream_done", first=False)
+                    metric_facts(stream_closed_on_done=True)
+                    break
+                if not payload_text:
+                    continue
+                try:
+                    event = json.loads(payload_text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    metric_mark("upstream_first_event")
+                    metric_increment("upstream_events")
+                    if event.get("error") or event.get("error_code"):
+                        metric_facts(upstream_stream_error=True, upstream_usage_limit=event.get("error_code") == "usage_limit")
+                        raise ChatGPTStreamError(event.get("error_code"))
+                    if _extract_text(event.get("v"), event.get("p")):
+                        metric_mark("upstream_first_text_parsed")
+                        metric_mark("upstream_last_text_parsed", first=False)
+                    _mark_message_completion(event)
+                    yield event
+            else:
+                metric_mark("upstream_eof", first=False)
+        finally:
+            with metric_span("local.upstream_response_close"):
+                response.close()
+            metric_mark("upstream_stream_closed", first=False)
 
     async def _stream_conversation_events(
         self,
@@ -693,7 +769,8 @@ class ChatGPTWebTransport:
             finally:
                 emit(None)
 
-        threading.Thread(target=worker, daemon=True).start()
+        context = contextvars.copy_context()
+        threading.Thread(target=lambda: context.run(worker), daemon=True).start()
 
         while True:
             item = await queue.get()
@@ -769,6 +846,7 @@ class ChatGPTWebTransport:
                 followed.extend(self._read_websocket_topic(topic_id, headers))
         return followed
 
+    @timed("upstream.websocket_handoff")
     def _read_websocket_topic(self, topic_id: str, headers: dict[str, str]) -> list[dict[str, Any]]:
         try:
             from curl_cffi import requests
@@ -1430,6 +1508,29 @@ def _body_preview(response: Any) -> str:
             "the HTTP transport; refresh the capture in a replayable browser session or use Safari/browser-backed Chrome."
         )
     return text[:400]
+
+
+def _mark_message_completion(event: dict[str, Any]) -> None:
+    # Message completion is diagnostic, not a safe end-of-turn signal: tools and
+    # follow-up messages can still arrive. Only [DONE] terminates the HTTP stream.
+    patches = event.get("v")
+    patches = patches if isinstance(patches, list) else [event]
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        if patch.get("p") == "/message/status" and patch.get("v") == "finished_successfully":
+            metric_mark("upstream_message_finished", first=False)
+        if patch.get("p") == "/message/end_turn" and patch.get("v") is True:
+            metric_mark("upstream_end_turn", first=False)
+    value = event.get("v")
+    message = value.get("message") if isinstance(value, dict) else event.get("message")
+    if isinstance(message, dict):
+        if message.get("status") == "finished_successfully":
+            metric_mark("upstream_message_finished", first=False)
+        if message.get("end_turn") is True:
+            metric_mark("upstream_end_turn", first=False)
+    if event.get("type") in {"message_stream_complete", "message_complete"}:
+        metric_mark("upstream_message_complete", first=False)
 
 
 def _event_to_delta(event: dict[str, Any]) -> ChatDelta | None:

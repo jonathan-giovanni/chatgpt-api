@@ -1,5 +1,32 @@
 from chatgpt_api.api.admin_store import BridgeAdminStore
 from chatgpt_api.providers.chatgpt.projects import ProjectMapping
+from contextlib import contextmanager
+
+
+def test_schema_is_migrated_once_and_reopens_current_data(tmp_path, monkeypatch):
+    statements = []
+    original = BridgeAdminStore._connect
+
+    @contextmanager
+    def connect(store):
+        with original(store) as db:
+            db.set_trace_callback(statements.append)
+            yield db
+
+    monkeypatch.setattr(BridgeAdminStore, "_connect", connect)
+    path = tmp_path / "admin.sqlite"
+    first = BridgeAdminStore(path)
+    first.set_setting("example", "current")
+    assert any("CREATE TABLE" in sql for sql in statements)
+    statements.clear()
+    second = BridgeAdminStore(path)
+    assert not any("CREATE TABLE" in sql for sql in statements)
+    assert second.get_setting("example") == "current"
+    # Replacing a database starts with its own schema version, not process state.
+    replacement = BridgeAdminStore(tmp_path / "other.sqlite")
+    replacement.set_setting("example", "replacement")
+    (tmp_path / "other.sqlite").replace(path)
+    assert BridgeAdminStore(path).get_setting("example") == "replacement"
 
 
 def test_artifacts_hide_missing_files(tmp_path):

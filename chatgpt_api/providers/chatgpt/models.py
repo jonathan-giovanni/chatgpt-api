@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+DEFAULT_CHAT_MODEL = "gpt-6-mini"
+
+
 EFFORT_SUFFIX = re.compile(
     r"^(?P<model>gpt-[a-z0-9-]+-(?:thinking|pro))-(?P<effort>standard|extended|max)$"
 )

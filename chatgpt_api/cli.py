@@ -44,12 +44,14 @@ from chatgpt_api.providers.chatgpt.crypto import (
     load_secrets_key,
     set_runtime_passphrase,
 )
-from chatgpt_api.providers.chatgpt.models import parse_model_picker
+from chatgpt_api.providers.chatgpt.models import DEFAULT_CHAT_MODEL, parse_model_picker
 from chatgpt_api.providers.chatgpt.proof import decode_proof_config, generate_proof_token
 from chatgpt_api.providers.chatgpt.provider import ChatGPTProvider
 from chatgpt_api.providers.chatgpt.request_capture import CapturedRequest
 from chatgpt_api.providers.chatgpt.timezone import local_timezone_payload
-from chatgpt_api.providers.chatgpt.transport import ChatGPTEndpoints, ChatGPTWebTransport, _websocket_url_headers
+from chatgpt_api.providers.chatgpt.transport import (
+    ChatGPTEndpoints, ChatGPTWebTransport, _websocket_url_headers, normalize_impersonate_profile,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -114,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     account_models.add_argument("path", type=Path, nargs="?")
     account_models.add_argument("--account", default=None)
     account_models.add_argument("--accounts-dir", type=Path, default=None)
-    account_models.add_argument("--impersonate", default="safari18_4")
+    account_models.add_argument("--impersonate", type=normalize_impersonate_profile, default="safari184")
     account_models.add_argument("--json", action="store_true")
     account_models.set_defaults(func=cmd_account_models)
 
@@ -122,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     account_check.add_argument("path", type=Path, nargs="?")
     account_check.add_argument("--account", default=None)
     account_check.add_argument("--accounts-dir", type=Path, default=None)
-    account_check.add_argument("--impersonate", default="safari18_4")
+    account_check.add_argument("--impersonate", type=normalize_impersonate_profile, default="safari184")
     account_check.set_defaults(func=cmd_account_check)
 
     account_limits = subparsers.add_parser("account-limits", help="Fetch ChatGPT live conversation init limits")
@@ -132,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     account_limits.add_argument("--requested-default-model", default=None)
     account_limits.add_argument("--conversation-id", default=None)
     account_limits.add_argument("--conversation-origin", default=None)
-    account_limits.add_argument("--impersonate", default="safari18_4")
+    account_limits.add_argument("--impersonate", type=normalize_impersonate_profile, default="safari184")
     account_limits.add_argument("--json", action="store_true")
     account_limits.set_defaults(func=cmd_account_limits)
 
@@ -323,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     admin_test_chat = admin_subparsers.add_parser("test-chat", help="Send a short API smoke-test chat")
     admin_commands.append(admin_test_chat)
     admin_test_chat.add_argument("--message", "-m", default="Say hello in one short sentence.")
-    admin_test_chat.add_argument("--model", default="auto")
+    admin_test_chat.add_argument("--model", default=os.environ.get("CHATGPT_DEFAULT_MODEL") or DEFAULT_CHAT_MODEL)
     admin_test_chat.add_argument("--json", action="store_true")
     admin_test_chat.set_defaults(func=cmd_admin_test_chat)
 
@@ -385,7 +387,7 @@ def build_parser() -> argparse.ArgumentParser:
     api_commands.append(api_chat)
     api_chat.add_argument("--message", "-m", required=True)
     api_chat.add_argument("--system", default=None)
-    api_chat.add_argument("--model", default="auto")
+    api_chat.add_argument("--model", default=os.environ.get("CHATGPT_DEFAULT_MODEL") or DEFAULT_CHAT_MODEL)
     api_chat.add_argument("--thinking-effort", default=None)
     api_chat.add_argument("--agent-mode", choices=["optimized", "opencode"], default=None)
     api_chat.add_argument("--temperature", type=float, default=None)
@@ -434,7 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
     api_vision.add_argument("--input-image", type=Path, action="append", default=[], required=True)
     api_vision.add_argument("--mode", choices=["ocr", "describe", "custom"], default="custom")
     api_vision.add_argument("--prompt", "-p", default=None)
-    api_vision.add_argument("--model", default="auto")
+    api_vision.add_argument("--model", default=os.environ.get("CHATGPT_DEFAULT_MODEL") or DEFAULT_CHAT_MODEL)
     api_vision.add_argument("--thinking-effort", default=None)
     api_vision.add_argument("--temporary-chat", action=argparse.BooleanOptionalAction, default=True)
     api_vision.add_argument("--output", type=Path, default=None, help="Write response text to a file")
@@ -477,7 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
         api_command.add_argument("--timeout", type=float, default=argparse.SUPPRESS)
 
     chat = subparsers.add_parser("chat", help="Send a chat message")
-    chat.add_argument("--model", default=None)
+    chat.add_argument("--model", default=os.environ.get("CHATGPT_DEFAULT_MODEL") or DEFAULT_CHAT_MODEL)
     chat.add_argument("--message", "-m", required=True)
     chat.add_argument("--system", default=None)
     chat.add_argument("--conversation-id", default=None)
@@ -490,7 +492,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--capture", type=Path, default=None)
     chat.add_argument("--use-captured-payload", action="store_true")
     chat.add_argument("--no-refresh-web-tokens", action="store_true")
-    chat.add_argument("--impersonate", default="safari18_4")
+    chat.add_argument("--impersonate", type=normalize_impersonate_profile, default="safari184")
     chat.add_argument("--max-events", type=int, default=None)
     chat.set_defaults(func=cmd_chat)
 
@@ -504,11 +506,11 @@ def build_parser() -> argparse.ArgumentParser:
     image.add_argument("--accounts-dir", type=Path, default=None)
     image.add_argument("--capture", type=Path, default=None)
     image.add_argument("--no-refresh-web-tokens", action="store_true")
-    image.add_argument("--impersonate", default="safari18_4")
+    image.add_argument("--impersonate", type=normalize_impersonate_profile, default="safari184")
     image.set_defaults(func=cmd_image)
 
     vision = subparsers.add_parser("vision", help="OCR or describe up to 10 input images")
-    vision.add_argument("--model", default=None)
+    vision.add_argument("--model", default=os.environ.get("CHATGPT_DEFAULT_MODEL") or DEFAULT_CHAT_MODEL)
     vision.add_argument("--mode", choices=["ocr", "describe", "custom"], default="custom")
     vision.add_argument("--prompt", "-p", default=None)
     vision.add_argument("--input-image", type=Path, action="append", default=[], required=True)
@@ -517,7 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
     vision.add_argument("--accounts-dir", type=Path, default=None)
     vision.add_argument("--capture", type=Path, default=None)
     vision.add_argument("--no-refresh-web-tokens", action="store_true")
-    vision.add_argument("--impersonate", default="safari18_4")
+    vision.add_argument("--impersonate", type=normalize_impersonate_profile, default="safari184")
     vision.set_defaults(func=cmd_vision)
 
     capture = subparsers.add_parser("inspect-capture", help="Inspect a copied ChatGPT request capture")
@@ -534,7 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--model", default="auto")
     probe.add_argument("--conversation-id", default=None)
     probe.add_argument("--transport", choices=["curl_cffi", "httpx"], default="curl_cffi")
-    probe.add_argument("--impersonate", default="chrome")
+    probe.add_argument("--impersonate", type=normalize_impersonate_profile, default="chrome")
     probe.add_argument("--refresh-web-tokens", action="store_true")
     probe.add_argument("--timeout", type=float, default=60.0)
     probe.add_argument("--max-events", type=int, default=12)
@@ -626,7 +628,8 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
             "Use the LAN URL, for example http://192.168.1.203:8000/v1."
         ),
     )
-    parser.add_argument("--impersonate", default=os.environ.get("CHATGPT_IMPERSONATE", "safari18_4"))
+    parser.add_argument("--impersonate", type=normalize_impersonate_profile,
+                        default=os.environ.get("CHATGPT_IMPERSONATE", "safari184"))
     parser.add_argument(
         "--web-timeout",
         type=float,
@@ -657,6 +660,11 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
         "--agent-mode",
         default=os.environ.get("CHATGPT_AGENT_MODE") or os.environ.get("CHATGPT_AGENT_PROMPT_MODE") or "optimized",
         help="Tool bridge prompt mode: optimized or opencode",
+    )
+    parser.add_argument(
+        "--default-model",
+        default=os.environ.get("CHATGPT_DEFAULT_MODEL") or DEFAULT_CHAT_MODEL,
+        help="Lightweight default for chat requests without model; explicit models are preserved.",
     )
     parser.add_argument(
         "--model-fallback",
@@ -3072,6 +3080,7 @@ async def cmd_serve(args: argparse.Namespace) -> int:
             agent_prompt_mode=args.agent_mode,
             account_strategy=args.account_strategy,
             model_fallback=args.model_fallback,
+            default_model=args.default_model,
             temporary_chat=args.temporary_chat,
             image_output_dir=args.image_output_dir,
             research_output_dir=args.research_output_dir,

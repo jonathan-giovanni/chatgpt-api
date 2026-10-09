@@ -26,6 +26,7 @@ import httpx
 
 from chatgpt_api.api.file_inputs import MAX_FILE_BYTES, MAX_INPUT_FILES, MAX_TOTAL_FILE_BYTES, file_content_part
 from chatgpt_api.providers.chatgpt.voice_events import VoiceEventRelay
+from chatgpt_api.providers.chatgpt.models import DEFAULT_CHAT_MODEL
 
 
 def decode_pcmu(payload: bytes) -> bytes:
@@ -619,7 +620,7 @@ def main() -> None:
     parser.add_argument("--rtp-port", type=int, default=int(os.environ.get("CHATGPT_SIP_RTP_PORT", "40000")))
     parser.add_argument("--allow-ip", action="append", dest="allowed_ips")
     parser.add_argument("--voice", default=os.environ.get("CHATGPT_SIP_VOICE", "fathom"))
-    parser.add_argument("--model", default=os.environ.get("CHATGPT_SIP_MODEL", "auto"))
+    parser.add_argument("--model", default=os.environ.get("CHATGPT_SIP_MODEL") or os.environ.get("CHATGPT_DEFAULT_MODEL") or DEFAULT_CHAT_MODEL)
     parser.add_argument("--project", default=os.environ.get("CHATGPT_SIP_PROJECT"))
     parser.add_argument("--conversation-id", default=os.environ.get("CHATGPT_SIP_CONVERSATION_ID"))
     parser.add_argument("--text", default=os.environ.get("CHATGPT_SIP_TEXT"))

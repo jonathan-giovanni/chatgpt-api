@@ -63,6 +63,14 @@ If you omit `--accounts`, the server auto-discovers every saved capture under
 `secrets/accounts/*`. Add `--accounts` only when you want to pin a clean pool,
 control order, or skip an old/broken capture.
 
+Ordinary chat defaults to `gpt-6-mini`, a lightweight model validated locally.
+Set `CHATGPT_DEFAULT_MODEL` or add server `--default-model <slug>` to change it.
+Client `--model <slug>` overrides that default; `--model auto` lets ChatGPT choose
+an available model. Check `api models` for observed model entries; an entry
+marked `source: configured` only reflects the server default and does not
+confirm account support. The default does not guarantee the fastest response
+for every workload.
+
 Recommended local command:
 
 ```sh
