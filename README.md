@@ -1685,6 +1685,11 @@ outputs/                Generated images, research reports, and SQLite metadata.
 
 ## Verification
 
+For request latency, enable `CHATGPT_REQUEST_METRICS=true` in the private
+environment. The API writes content-free JSON timings and returns
+`X-Request-Id`; the live benchmark compares initial chats with UUID
+continuations. See [request timing logs and benchmark](docs/REQUEST_METRICS.md).
+
 Python:
 
 ```sh
@@ -1813,6 +1818,7 @@ opencode does not use the bridge
 
 - [Account capture guide](docs/ACCOUNT_CAPTURE.md)
 - [Chrome connector setup and renewal](docs/CHROME_EXTENSION.md)
+- [Request timing logs and live benchmark](docs/REQUEST_METRICS.md)
 - [CLI guide](docs/CLI.md)
 - [Docker guide](docs/DOCKER.md)
 - [OpenAI-shaped API guide](docs/OPENAI_COMPATIBILITY.md)

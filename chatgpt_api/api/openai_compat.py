@@ -53,6 +53,9 @@ from chatgpt_api.api.prompts import (
     TOOL_BRIDGE_PROMPT,
 )
 from chatgpt_api.core.errors import ProviderError
+from chatgpt_api.core.request_metrics import (
+    current_metrics, emit_metrics, metric_facts, metric_mark, metric_span, request_metrics, timed,
+)
 from chatgpt_api.core.types import ChatRequest, ContentPart, ImageRequest, ImageResponse, Message
 from chatgpt_api.providers.chatgpt.account_info import detect_account_info, infer_account_capabilities, load_settings_file
 from chatgpt_api.providers.chatgpt.accounts import (
@@ -318,6 +321,7 @@ def _configure_account_limits(config: OpenAICompatConfig, router: AccountRouter)
         router.set_account_limit(account, _account_concurrency_limit(config, account))
 
 
+@timed("local.account_routing")
 def _router_for_request(
     config: OpenAICompatConfig,
     default_router: AccountRouter | None,
@@ -379,6 +383,7 @@ def _default_bridge_settings() -> dict[str, Any]:
     }
 
 
+@timed("local.bridge_settings")
 def _bridge_settings(config: OpenAICompatConfig) -> dict[str, Any]:
     stored = _admin_store(config).get_setting(BRIDGE_SETTINGS_KEY, {})
     settings = _normalize_bridge_settings(stored)
@@ -545,6 +550,7 @@ def _finish_chatgpt_operation(operation_id: str | None) -> None:
     _update_chatgpt_operation(operation_id, completed=True)
 
 
+@timed("local.finalize_conversation")
 async def _finalize_conversation_session(
     config: OpenAICompatConfig,
     operation: _ChatGPTOperation,
@@ -688,7 +694,8 @@ async def _with_provider_account_limit(provider: ChatGPTProvider, operation: Any
     if not isinstance(account, str) or not account:
         return await operation()
     limiter = _global_account_limiter(account)
-    await asyncio.to_thread(limiter.acquire)
+    with metric_span("queue.account"):
+        await asyncio.to_thread(limiter.acquire)
     try:
         return await operation()
     finally:
@@ -704,11 +711,13 @@ async def _with_provider_feature_limit(
     account = getattr(provider, "_chatgpt_api_account", None)
     if not isinstance(account, str) or not account:
         return await operation()
-    limit = _feature_account_concurrency_limit(config, feature, account)
+    with metric_span("local.feature_settings"):
+        limit = _feature_account_concurrency_limit(config, feature, account)
     if limit <= 0:
         raise ProviderError(f"ChatGPT {feature} is disabled for account '{account}' by bridge concurrency settings")
     limiter = _feature_limiter(feature, account, limit)
-    await asyncio.to_thread(limiter.acquire)
+    with metric_span(f"queue.{feature}"):
+        await asyncio.to_thread(limiter.acquire)
     try:
         return await operation()
     finally:
@@ -736,6 +745,7 @@ async def _with_provider_feature_limits(
     return await run(0)
 
 
+@timed("local.model_account_selection")
 def _account_order_for_model(
     config: OpenAICompatConfig,
     router: AccountRouter,
@@ -1310,6 +1320,29 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             _send_json(self, 404, {"error": {"message": "not found", "type": "not_found"}})
 
         def do_POST(self) -> None:  # noqa: N802
+            enabled = (
+                urlparse(self.path).path == "/v1/chat/completions"
+                and os.environ.get("CHATGPT_REQUEST_METRICS", "").lower() in {"1", "true", "yes", "on"}
+            )
+            with request_metrics(enabled) as trace:
+                self._metrics_status = None
+                try:
+                    self._do_POST()
+                finally:
+                    if trace is not None:
+                        emit_metrics(trace, self._metrics_status)
+
+        def send_response(self, code: int, message: str | None = None) -> None:
+            self._metrics_status = code
+            super().send_response(code, message)
+
+        def end_headers(self) -> None:
+            trace = current_metrics()
+            if trace is not None:
+                self.send_header("X-Request-Id", trace.request_id)
+            super().end_headers()
+
+        def _do_POST(self) -> None:
             path = urlparse(self.path).path
             if path in {"/v1/chatgpt/extension/activate", "/v1/chatgpt/extension/health", "/v1/chatgpt/extension/sync", "/v1/chatgpt/extension/report"}:
                 try:
@@ -1407,7 +1440,9 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
                 _send_json(self, 404, {"error": {"message": "not found", "type": "not_found"}})
                 return
             try:
-                body = _read_json_body(self)
+                with metric_span("local.request_parse"):
+                    body = _read_json_body(self)
+                metric_facts(streaming=bool(body.get("stream")))
                 if path == "/v1/chat/completions":
                     header_project = _str_or_none(self.headers.get("X-ChatGPT-Project"))
                     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
@@ -1433,7 +1468,9 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             except ValueError as exc:
                 _send_json(self, 400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
                 return
-            _send_json(self, 200, response)
+            with metric_span("local.response_delivery"):
+                _send_json(self, 200, response)
+            metric_mark("client_complete")
 
         def log_message(self, format: str, *args: Any) -> None:
             return
@@ -1838,6 +1875,7 @@ async def _chat_completion_stream_with_project(
         _write_sse_finish(handler, chunk_base, "stop")
     except ProviderError as exc:
         status, payload = _provider_error_status_and_payload(exc)
+        metric_facts(provider_failed=True)
         message = payload.get("error", {}).get("message") if isinstance(payload.get("error"), dict) else str(exc)
         _write_sse_content(handler, chunk_base, f"ChatGPT provider error ({status}): {message}")
         _write_sse_finish(handler, chunk_base, "stop")
@@ -3072,6 +3110,7 @@ def _conversation_id_from_body(body: dict[str, Any]) -> str | None:
     return conversation_id
 
 
+@timed("local.conversation_lookup")
 def _hydrate_conversation_request(config: OpenAICompatConfig, body: dict[str, Any]) -> dict[str, Any] | None:
     conversation_id = _conversation_id_from_body(body)
     if not conversation_id:
@@ -3127,6 +3166,7 @@ def _validate_conversation_request(
     return conversation_id, parent_message_id
 
 
+@timed("local.project_lookup")
 def _resolve_project_request(config: OpenAICompatConfig, body: dict[str, Any]) -> ProjectMapping | None:
     reference = _project_reference_from_body(body)
     if not reference:
@@ -4795,6 +4835,7 @@ def _provider_error_message(
     return f"ChatGPT Web request failed{model_text}.{status_text} {hint}{init_text} Raw error: {raw_message}"
 
 
+@timed("local.capture_load_provider")
 def _provider_for_account(
     config: OpenAICompatConfig,
     account: str | None = None,
@@ -6246,6 +6287,8 @@ def _write_sse_content(handler: BaseHTTPRequestHandler, chunk_base: dict[str, An
             "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
         },
     )
+    metric_mark("client_first_text")
+    metric_mark("client_last_text", first=False)
 
 
 def _write_sse_tool_calls(
@@ -6287,6 +6330,7 @@ def _write_sse_finish(handler: BaseHTTPRequestHandler, chunk_base: dict[str, Any
         if _is_client_disconnect_error(exc):
             raise _ClientDisconnected() from exc
         pass
+    metric_mark("client_complete")
 
 
 def _write_sse(handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> None:
