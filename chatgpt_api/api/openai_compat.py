@@ -12,6 +12,8 @@ import re
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -76,6 +78,7 @@ from chatgpt_api.providers.chatgpt.projects import (
 )
 from chatgpt_api.providers.chatgpt.conversation_history import conversation_timeline
 from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport
+from chatgpt_api.providers.chatgpt.requirements_cache import chat_policy
 from chatgpt_api.providers.chatgpt.voice import (
     VoiceSignallingError, bind_conversation, bound_session, negotiate_voice, release_session,
 )
@@ -92,6 +95,16 @@ class _DownloadFile:
 
 _DOWNLOAD_FILES: dict[str, _DownloadFile] = {}
 _DOWNLOAD_FILES_LOCK = threading.Lock()
+_REQUEST_STORES: ContextVar[dict[Path, BridgeAdminStore] | None] = ContextVar("request_admin_stores", default=None)
+
+
+@contextmanager
+def _admin_store_scope():
+    token = _REQUEST_STORES.set({})
+    try:
+        yield
+    finally:
+        _REQUEST_STORES.reset(token)
 
 
 class AccountRouter:
@@ -1483,10 +1496,11 @@ async def _chat_completion(
     body: dict[str, Any],
     router: AccountRouter | None = None,
 ) -> dict[str, Any]:
-    _hydrate_conversation_request(config, body)
-    mapping = _resolve_project_request(config, body)
-    with project_context(mapping.project_id if mapping else None):
-        response = await _chat_completion_with_project(config, body, router)
+    with _admin_store_scope(), chat_policy(body):
+        _hydrate_conversation_request(config, body)
+        mapping = _resolve_project_request(config, body)
+        with project_context(mapping.project_id if mapping else None):
+            response = await _chat_completion_with_project(config, body, router)
     if mapping:
         response["chatgpt_project"] = {
             "alias": mapping.alias,
@@ -1740,10 +1754,11 @@ async def _chat_completion_stream(
     router: AccountRouter,
     handler: BaseHTTPRequestHandler,
 ) -> None:
-    _hydrate_conversation_request(config, body)
-    mapping = _resolve_project_request(config, body)
-    with project_context(mapping.project_id if mapping else None):
-        await _chat_completion_stream_with_project(config, body, router, handler, mapping)
+    with _admin_store_scope(), chat_policy(body):
+        _hydrate_conversation_request(config, body)
+        mapping = _resolve_project_request(config, body)
+        with project_context(mapping.project_id if mapping else None):
+            await _chat_completion_stream_with_project(config, body, router, handler, mapping)
 
 
 async def _chat_completion_stream_with_project(
@@ -2007,7 +2022,8 @@ async def _stream_messages_text_with_accounts(
         except ProviderError as exc:
             if chunks:
                 raise
-            init_metadata = init_metadata or await _conversation_init_metadata(provider, model_slug)
+            init_metadata = init_metadata or ({} if getattr(exc, "upstream_error_code", None)
+                                             else await _conversation_init_metadata(provider, model_slug))
             compat_error = OpenAICompatProviderError(
                 exc,
                 requested_model,
@@ -3712,7 +3728,15 @@ def _admin_db_path(config: OpenAICompatConfig) -> Path:
 
 
 def _admin_store(config: OpenAICompatConfig) -> BridgeAdminStore:
-    return BridgeAdminStore(_admin_db_path(config))
+    path = _admin_db_path(config)
+    stores = _REQUEST_STORES.get()
+    if stores is not None and path in stores:
+        return stores[path]
+    with metric_span("local.admin_store_initialize"):
+        store = BridgeAdminStore(path)
+    if stores is not None:
+        stores[path] = store
+    return store
 
 
 def _project_root() -> Path:
@@ -3848,7 +3872,8 @@ async def _collect_messages_text_with_accounts(
                 ),
             )
         except ProviderError as exc:
-            init_metadata = init_metadata or await _conversation_init_metadata(provider, model_slug)
+            init_metadata = init_metadata or ({} if getattr(exc, "upstream_error_code", None)
+                                             else await _conversation_init_metadata(provider, model_slug))
             compat_error = OpenAICompatProviderError(
                 exc,
                 requested_model,
@@ -4696,7 +4721,7 @@ def _classify_provider_error(message: str, provider_status: int | None) -> tuple
             401,
             "Refresh the account capture/cookies, then retry.",
         )
-    if provider_status == 429 or any(keyword in normalized for keyword in ("rate limit", "too many", "quota")):
+    if provider_status == 429 or any(keyword in normalized for keyword in ("rate limit", "too many", "quota", "usage_limit")):
         return (
             "chatgpt_rate_limited",
             "provider_rate_limit",
@@ -4810,9 +4835,6 @@ def _matching_model_limit(
         if not isinstance(item, dict):
             continue
         if item.get("model_slug") in candidates or item.get("using_default_model_slug") in candidates:
-            return item
-    for item in model_limits:
-        if isinstance(item, dict):
             return item
     return None
 

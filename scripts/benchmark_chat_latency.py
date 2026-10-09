@@ -62,7 +62,7 @@ def measure(client: httpx.Client, body: dict) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project", required=True)
+    parser.add_argument("--project", help="omit for ordinary chats outside a project")
     parser.add_argument("--model", default="auto")
     parser.add_argument("--prompt-file", type=Path, required=True)
     parser.add_argument("--conversations", type=int, default=20)
@@ -82,14 +82,16 @@ def main() -> None:
         projects_response = client.get("/v1/chatgpt/admin/projects")
         projects_response.raise_for_status()
         mappings = projects_response.json().get("data", [])
-        if not any(args.project.casefold() in {str(p.get("name", "")).casefold(), str(p.get("alias", "")).casefold()} for p in mappings):
+        if args.project and not any(args.project.casefold() in {str(p.get("name", "")).casefold(), str(p.get("alias", "")).casefold()} for p in mappings):
             raise SystemExit("Project is not registered in this bridge; configure it in Console first.")
         with args.output.open("w", encoding="utf-8") as output:
             for conversation in range(1, args.conversations + 1):
                 conversation_id = None
                 for turn in range(1, args.follow_ups + 2):
-                    body = {"model": args.model, "chatgpt_project": args.project, "stream": True,
+                    body = {"model": args.model, "stream": True,
                             "temporary_chat": False, "messages": [{"role": "user", "content": prompt}]}
+                    if args.project:
+                        body["chatgpt_project"] = args.project
                     if conversation_id:
                         body["conversation_id"] = conversation_id
                     result = measure(client, body)

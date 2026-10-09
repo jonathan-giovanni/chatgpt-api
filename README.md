@@ -1688,7 +1688,11 @@ outputs/                Generated images, research reports, and SQLite metadata.
 For request latency, enable `CHATGPT_REQUEST_METRICS=true` in the private
 environment. The API writes content-free JSON timings and returns
 `X-Request-Id`; the live benchmark compares initial chats with UUID
-continuations. See [request timing logs and benchmark](docs/REQUEST_METRICS.md).
+continuations. The transport also measures message completion and HTTP cleanup,
+stops parsing at `[DONE]`, and avoids repeated SQLite schema initialization
+within a chat request. Optional parallel preparation preserves fresh session
+validation; experimental requirements reuse excludes interactive challenges.
+See [request timing logs, controls, and paired benchmarks](docs/REQUEST_METRICS.md).
 
 Python:
 

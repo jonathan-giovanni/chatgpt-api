@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -24,6 +25,9 @@ from chatgpt_api.core.types import ChatDelta, ChatRequest, ImageAsset, ImageInpu
 from chatgpt_api.providers.chatgpt.auth import ChatGPTAuthConfig
 from chatgpt_api.providers.chatgpt.proof import decode_proof_config, generate_proof_token
 from chatgpt_api.providers.chatgpt.projects import conversation_mode, current_project_id
+from chatgpt_api.providers.chatgpt.requirements_cache import (
+    CACHE, TOKEN_HEADERS, Entry, cache_scope, cacheable_requirements, chat_exchange, current_exchange,
+)
 from chatgpt_api.providers.chatgpt.timezone import local_timezone_payload
 
 MAX_CHATGPT_INPUT_IMAGES = 10
@@ -56,6 +60,16 @@ class DeepResearchResult:
     metadata: dict[str, Any]
 
 
+class _CachedRequirementsRejected(ProviderError):
+    """An explicit token rejection before any conversation stream was accepted."""
+
+
+class ChatGPTStreamError(ProviderError):
+    def __init__(self, code: Any) -> None:
+        self.upstream_error_code = code if isinstance(code, str) and re.fullmatch(r"[a-z_]{2,64}", code) else "upstream_error"
+        super().__init__(f"ChatGPT conversation stream reported {self.upstream_error_code}")
+
+
 class ChatGPTWebTransport:
     """Owns ChatGPT Web HTTP details.
 
@@ -85,6 +99,15 @@ class ChatGPTWebTransport:
             )
 
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[ChatDelta]:
+        with chat_exchange() as exchange:
+            conversation_id = request.conversation_id
+            async for delta in self._stream_chat(request):
+                conversation_id = delta.conversation_id or conversation_id
+                yield delta
+            exchange.bind(conversation_id)
+            metric_facts(requirements_cache_seeded=bool(exchange.ttl and exchange.scope and exchange.candidate and conversation_id))
+
+    async def _stream_chat(self, request: ChatRequest) -> AsyncIterator[ChatDelta]:
         metric_increment("provider_attempts")
         metric_facts(continuation=bool(request.conversation_id), project=bool(current_project_id()),
                      thinking_effort_configured=bool(request.thinking_effort),
@@ -97,14 +120,26 @@ class ChatGPTWebTransport:
             headers = await asyncio.to_thread(self._refresh_web_tokens, headers, payload)
             _mark_payload_sent_after_prepare(payload)
 
-        async for event in self._stream_conversation_events(conversation_url, headers, payload):
-            delta = _event_to_delta(event)
-            if delta is not None:
-                if delta.text:
-                    metric_mark("provider_first_text")
-                    metric_mark("provider_last_text", first=False)
-                    metric_increment("output_chars", len(delta.text))
-                yield delta
+        emitted = False
+        for attempt in range(2):
+            try:
+                async for event in self._stream_conversation_events(conversation_url, headers, payload):
+                    delta = _event_to_delta(event)
+                    if delta is not None:
+                        emitted = True
+                        if delta.text:
+                            metric_mark("provider_first_text")
+                            metric_mark("provider_last_text", first=False)
+                            metric_increment("output_chars", len(delta.text))
+                        yield delta
+                return
+            except _CachedRequirementsRejected:
+                exchange = current_exchange()
+                if emitted or attempt or exchange is None:
+                    raise
+                exchange.force_fresh = True
+                metric_increment("requirements_cache_fallbacks")
+                headers = await asyncio.to_thread(self._refresh_web_tokens, self.auth.request_headers(), payload)
 
     async def deep_research(self, request: ChatRequest) -> DeepResearchResult:
         self.ensure_configured()
@@ -591,38 +626,62 @@ class ChatGPTWebTransport:
 
         refreshed = dict(headers)
         refresh_timeout = min(float(self.timeout), 30.0)
-        with metric_span("upstream.prepare") as span:
-            prepare_response = requests.post(
-                self.endpoints.prepare_url,
-                headers=_json_headers_for_token_refresh(headers),
-                data=json.dumps(_prepare_payload(payload), separators=(",", ":")).encode("utf-8"),
-                impersonate=self.impersonate,
-                timeout=refresh_timeout,
-            )
-            if span is not None:
-                span["status"] = prepare_response.status_code
+        exchange = current_exchange()
+        entry = None
+        if exchange and exchange.ttl:
+            exchange.scope = cache_scope(headers, payload, self.endpoints.requirements_url, self.impersonate)
+            conversation_id = payload.get("conversation_id")
+            exchange.key = (exchange.scope, conversation_id) if isinstance(conversation_id, str) else None
+            entry = CACHE.get(exchange.key, exchange.ttl) if exchange.key and not exchange.force_fresh else None
+            exchange.hit = entry is not None
+            metric_facts(requirements_cache_hit=exchange.hit)
+        else:
+            metric_facts(requirements_cache_hit=False)
+        created = time.monotonic()
+        prepare_data = json.dumps(_prepare_payload(payload), separators=(",", ":")).encode("utf-8")
+
+        def post_token(url: str, data: bytes, phase: str) -> Any:
+            with metric_span(phase) as span:
+                response = requests.post(url, headers=_json_headers_for_token_refresh(headers), data=data,
+                                         impersonate=self.impersonate, timeout=refresh_timeout)
+                if span is not None:
+                    span["status"] = response.status_code
+                return response
+
+        parallel = bool(exchange and exchange.parallel_preparation and not entry)
+        metric_facts(parallel_preparation=parallel)
+        requirements_response = None
+        if parallel:
+            context = contextvars.copy_context()
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(context.run, post_token, self.endpoints.requirements_url,
+                                         b'{"p":null}', "upstream.requirements")
+                prepare_response = post_token(self.endpoints.prepare_url, prepare_data, "upstream.prepare")
+                requirements_response = future.result()
+        else:
+            prepare_response = post_token(self.endpoints.prepare_url, prepare_data, "upstream.prepare")
         if prepare_response.status_code >= 400:
             raise ProviderError(f"ChatGPT prepare failed: {prepare_response.status_code} {_body_preview(prepare_response)}")
         prepare_json = _json_response(prepare_response)
         conduit_token = prepare_json.get("conduit_token") or prepare_response.headers.get("x-conduit-token")
         if conduit_token:
             refreshed["x-conduit-token"] = conduit_token
-
-        with metric_span("upstream.requirements") as span:
-            requirements_response = requests.post(
-                self.endpoints.requirements_url,
-                headers=_json_headers_for_token_refresh(headers),
-                data=b'{"p":null}',
-                impersonate=self.impersonate,
-                timeout=refresh_timeout,
-            )
-            if span is not None:
-                span["status"] = requirements_response.status_code
+        if entry:
+            refreshed.update(entry.headers)
+            metric_facts(requirements_cache_age_ms=round((time.monotonic() - entry.created) * 1000, 3),
+                         proof_required=entry.proof_required)
+            return refreshed
+        if requirements_response is None:
+            requirements_response = post_token(self.endpoints.requirements_url, b'{"p":null}', "upstream.requirements")
         if requirements_response.status_code >= 400:
             raise ProviderError(
                 f"ChatGPT requirements failed: {requirements_response.status_code} {_body_preview(requirements_response)}"
             )
         requirements_json = _json_response(requirements_response)
+        metric_facts(requirements_has_token=bool(requirements_json.get("token")),
+                     requirements_interactive_challenge=any(isinstance(requirements_json.get(name), dict)
+                         and bool(requirements_json[name].get("required")) for name in ("arkose", "turnstile", "captcha")),
+                     requirements_cache_enabled=bool(exchange and exchange.ttl))
         requirements_token = requirements_json.get("token")
         if requirements_token:
             refreshed["openai-sentinel-chat-requirements-token"] = requirements_token
@@ -641,6 +700,9 @@ class ChatGPTWebTransport:
                 )
             if proof_token:
                 refreshed["openai-sentinel-proof-token"] = proof_token
+        if exchange and exchange.ttl and cacheable_requirements(requirements_json):
+            exchange.candidate = Entry(created, {key: refreshed[key] for key in TOKEN_HEADERS if key in refreshed},
+                                       bool(isinstance(proof_challenge, dict) and proof_challenge.get("required")))
         return refreshed
 
     def _post_conversation(
@@ -679,28 +741,55 @@ class ChatGPTWebTransport:
             if span is not None:
                 span["status"] = response.status_code
         metric_mark("upstream_headers", first=False)
-        if response.status_code >= 400:
-            raise ProviderError(f"ChatGPT conversation failed: {response.status_code} {_body_preview(response)}")
-
-        for raw_line in response.iter_lines():
-            line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
-            if not line.startswith("data: "):
-                continue
-            payload_text = line[6:].strip()
-            if payload_text == "[DONE]":
-                metric_mark("upstream_done", first=False)
-                continue
-            if not payload_text:
-                continue
-            try:
-                event = json.loads(payload_text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict):
-                metric_mark("upstream_first_event")
-                metric_increment("upstream_events")
-                yield event
-        metric_mark("upstream_eof", first=False)
+        exchange = current_exchange()
+        close_on_done = exchange.close_on_done if exchange else True
+        metric_facts(stream_close_on_done=close_on_done)
+        try:
+            if response.status_code >= 400:
+                error = f"ChatGPT conversation failed: {response.status_code} {_body_preview(response)}"
+                if exchange and exchange.hit and exchange.key:
+                    CACHE.invalidate(exchange.key)
+                    metric_facts(requirements_cache_invalidated=True)
+                    if response.status_code in {400, 401, 403} and _explicit_requirements_rejection(_json_response(response)):
+                        raise _CachedRequirementsRejected(error)
+                raise ProviderError(error)
+            for raw_line in response.iter_lines():
+                line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+                if not line.startswith("data: "):
+                    continue
+                payload_text = line[6:].strip()
+                if payload_text == "[DONE]":
+                    metric_mark("upstream_done", first=False)
+                    if close_on_done:
+                        metric_facts(stream_closed_on_done=True)
+                        break
+                    continue
+                if not payload_text:
+                    continue
+                try:
+                    event = json.loads(payload_text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    metric_mark("upstream_first_event")
+                    metric_increment("upstream_events")
+                    if event.get("error") or event.get("error_code"):
+                        metric_facts(upstream_stream_error=True, upstream_usage_limit=event.get("error_code") == "usage_limit")
+                        if exchange and exchange.hit and exchange.key:
+                            CACHE.invalidate(exchange.key)
+                            metric_facts(requirements_cache_invalidated=True)
+                        raise ChatGPTStreamError(event.get("error_code"))
+                    if _extract_text(event.get("v"), event.get("p")):
+                        metric_mark("upstream_first_text_parsed")
+                        metric_mark("upstream_last_text_parsed", first=False)
+                    _mark_message_completion(event)
+                    yield event
+            else:
+                metric_mark("upstream_eof", first=False)
+        finally:
+            with metric_span("local.upstream_response_close"):
+                response.close()
+            metric_mark("upstream_stream_closed", first=False)
 
     async def _stream_conversation_events(
         self,
@@ -1466,6 +1555,38 @@ def _body_preview(response: Any) -> str:
             "the HTTP transport; refresh the capture in a replayable browser session or use Safari/browser-backed Chrome."
         )
     return text[:400]
+
+
+def _explicit_requirements_rejection(data: dict[str, Any]) -> bool:
+    error = data.get("error")
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code") or error.get("type")
+    return code in {"invalid_chat_requirements_token", "expired_chat_requirements_token",
+                    "invalid_sentinel_token", "invalid_proof_token"}
+
+
+def _mark_message_completion(event: dict[str, Any]) -> None:
+    # Message completion is diagnostic, not a safe end-of-turn signal: tools and
+    # follow-up messages can still arrive. Only [DONE] terminates the HTTP stream.
+    patches = event.get("v")
+    patches = patches if isinstance(patches, list) else [event]
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        if patch.get("p") == "/message/status" and patch.get("v") == "finished_successfully":
+            metric_mark("upstream_message_finished", first=False)
+        if patch.get("p") == "/message/end_turn" and patch.get("v") is True:
+            metric_mark("upstream_end_turn", first=False)
+    value = event.get("v")
+    message = value.get("message") if isinstance(value, dict) else event.get("message")
+    if isinstance(message, dict):
+        if message.get("status") == "finished_successfully":
+            metric_mark("upstream_message_finished", first=False)
+        if message.get("end_turn") is True:
+            metric_mark("upstream_end_turn", first=False)
+    if event.get("type") in {"message_stream_complete", "message_complete"}:
+        metric_mark("upstream_message_complete", first=False)
 
 
 def _event_to_delta(event: dict[str, Any]) -> ChatDelta | None:
