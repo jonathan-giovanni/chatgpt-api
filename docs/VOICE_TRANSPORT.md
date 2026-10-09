@@ -30,6 +30,13 @@ model; `model` selects the model for the optional initial text turn. Passing a
 regular chat model slug to the private live voice handshake was observed to
 produce a connected but silent call, so the voice model remains automatic.
 
+If the optional initial text turn omits `model`, it uses the bridge's configured
+ordinary-chat default (`CHATGPT_DEFAULT_MODEL` / `--default-model`, initially
+`gpt-6-mini`). The SIP CLI accepts `CHATGPT_SIP_MODEL` as its own override. An
+explicit `model`, including `auto`, is preserved for that text turn; it does not
+change the upstream live voice model. Check observed entries in `/v1/models`;
+an entry with `source: configured` alone does not confirm account support.
+
 ## Minimal WebRTC API
 
 Create a browser `RTCPeerConnection` with an audio track and optional negotiated

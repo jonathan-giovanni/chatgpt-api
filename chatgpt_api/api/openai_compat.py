@@ -77,8 +77,8 @@ from chatgpt_api.providers.chatgpt.projects import (
     validate_project_mapping,
 )
 from chatgpt_api.providers.chatgpt.conversation_history import conversation_timeline
-from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport
-from chatgpt_api.providers.chatgpt.requirements_cache import chat_policy
+from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport, normalize_impersonate_profile
+from chatgpt_api.providers.chatgpt.preparation import chat_policy
 from chatgpt_api.providers.chatgpt.voice import (
     VoiceSignallingError, bind_conversation, bound_session, negotiate_voice, release_session,
 )
@@ -96,15 +96,18 @@ class _DownloadFile:
 _DOWNLOAD_FILES: dict[str, _DownloadFile] = {}
 _DOWNLOAD_FILES_LOCK = threading.Lock()
 _REQUEST_STORES: ContextVar[dict[Path, BridgeAdminStore] | None] = ContextVar("request_admin_stores", default=None)
+_REQUEST_LIMITS: ContextVar[dict[tuple[OpenAICompatConfig, str, str], int] | None] = ContextVar("request_feature_limits", default=None)
 
 
 @contextmanager
 def _admin_store_scope():
     token = _REQUEST_STORES.set({})
+    limits_token = _REQUEST_LIMITS.set({})
     try:
         yield
     finally:
         _REQUEST_STORES.reset(token)
+        _REQUEST_LIMITS.reset(limits_token)
 
 
 class AccountRouter:
@@ -477,6 +480,17 @@ def _parse_concurrency_override(value: str | None) -> dict[str, int]:
 
 
 def _feature_account_concurrency_limit(config: OpenAICompatConfig, feature: str, account: str) -> int:
+    limits = _REQUEST_LIMITS.get()
+    key = (config, feature, account)
+    if limits is not None and key in limits:
+        return limits[key]
+    limit = _read_feature_account_concurrency_limit(config, feature, account)
+    if limits is not None:
+        limits[key] = limit
+    return limit
+
+
+def _read_feature_account_concurrency_limit(config: OpenAICompatConfig, feature: str, account: str) -> int:
     settings = _bridge_settings(config)
     feature_settings = settings.get("concurrency", {}).get(feature, {})
     accounts = feature_settings.get("accounts") if isinstance(feature_settings, dict) else {}
@@ -766,7 +780,7 @@ def _account_order_for_model(
     thinking_effort: str | None,
 ) -> tuple[str, ...]:
     ordered = router.order()
-    if model_slug == "auto":
+    if model_slug == "auto" or len(ordered) == 1:
         return ordered
     supported: list[str] = []
     unknown: list[str] = []
@@ -902,7 +916,7 @@ async def _start_voice_session(
     project = body.get("project")
     if project is None:
         project = body.get("chatgpt_project")
-    model = body.get("model", "auto")
+    model = body.get("model", "auto" if bridge_id else config.default_model)
     if not isinstance(model, str) or not model or model in DEEP_RESEARCH_MODEL_ALIASES or model == "gpt-image-1":
         raise ValueError("model must be an ordinary ChatGPT model")
     model_slug, _ = _resolve_model_alias(model, None)
@@ -1519,7 +1533,7 @@ async def _chat_completion_with_project(
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
-    requested_model = _str_or_none(body.get("model")) or "auto"
+    requested_model = _str_or_none(body.get("model")) or config.default_model
     model, model_agent_mode = _split_model_agent_mode(requested_model)
     agent_prompt_mode = _resolve_agent_prompt_mode(config, body, model_agent_mode)
     model_slug, thinking_effort = _resolve_model_alias(model, _str_or_none(body.get("thinking_effort")))
@@ -1771,7 +1785,7 @@ async def _chat_completion_stream_with_project(
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
-    requested_model = _str_or_none(body.get("model")) or "auto"
+    requested_model = _str_or_none(body.get("model")) or config.default_model
     model, model_agent_mode = _split_model_agent_mode(requested_model)
     agent_prompt_mode = _resolve_agent_prompt_mode(config, body, model_agent_mode)
     model_slug, thinking_effort = _resolve_model_alias(model, _str_or_none(body.get("thinking_effort")))
@@ -2986,6 +3000,7 @@ def _admin_status_response(config: OpenAICompatConfig, router: AccountRouter) ->
             },
             "agent_prompt_mode": _normalize_agent_prompt_mode(config.agent_prompt_mode),
             "model_fallback": config.model_fallback or "none",
+            "default_model": config.default_model,
             "temporary_chat": config.temporary_chat,
         },
         "settings": _bridge_settings(config),
@@ -3241,7 +3256,7 @@ async def _admin_post_response(
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         test_body = {
-            "model": _str_or_none(body.get("model")) or "auto",
+            "model": _str_or_none(body.get("model")) or config.default_model,
             "messages": messages,
             "stream": False,
             "metadata": {"source": "bridge_console_test_chat"},
@@ -4887,15 +4902,15 @@ def _provider_for_account(
 
 
 def _impersonate_for_capture(configured: str | None, capture: CapturedRequest) -> str:
-    selected = (configured or "").strip()
-    if selected and selected.lower() not in {"auto", "default", "safari18_4", "safari18_0"}:
+    selected = normalize_impersonate_profile(configured or "")
+    if selected and selected.lower() not in {"auto", "default", "safari184", "safari180"}:
         return selected
     user_agent = (capture.headers.get("user-agent") or "").lower()
     if "chrome/" in user_agent or "chromium/" in user_agent:
         return "chrome"
     if "firefox/" in user_agent:
         return "firefox135"
-    return selected or "safari18_4"
+    return selected if selected and selected.lower() not in {"auto", "default"} else "safari184"
 
 
 async def _maybe_handle_local_chatgpt_command(
@@ -5196,6 +5211,12 @@ def _models_for_config(config: OpenAICompatConfig) -> list[dict[str, Any]]:
     for account in _accounts_for_config(config):
         for model in _models_for_account(config, account):
             merged.setdefault(model["id"], model)
+    if config.default_model not in merged:
+        merged[config.default_model] = {
+            "id": config.default_model,
+            "name": config.default_model,
+            "chatgpt": {"provider_model": config.default_model, "mode": "standard", "source": "configured"},
+        }
     merged.setdefault("gpt-image-1", {"id": "gpt-image-1", "name": "ChatGPT Image"})
     merged.setdefault("chatgpt-deep-research", {"id": "chatgpt-deep-research", "name": "ChatGPT Deep Research"})
     return list(merged.values())

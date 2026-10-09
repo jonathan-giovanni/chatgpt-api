@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from chatgpt_api.providers.chatgpt.projects import ProjectMapping, normalize_project_alias
+
+SCHEMA_VERSION = 1
 
 
 def utc_now() -> str:
@@ -21,13 +25,20 @@ class BridgeAdminStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _migrate(self) -> None:
         with self._connect() as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+                return
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS artifacts (
@@ -90,6 +101,7 @@ class BridgeAdminStore:
                     ON conversation_sessions(account, updated_at DESC);
                 """
             )
+            db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def record_artifact(
         self,

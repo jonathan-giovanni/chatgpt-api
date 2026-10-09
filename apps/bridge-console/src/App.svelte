@@ -13,6 +13,7 @@
   import Textarea from "./lib/Textarea.svelte";
   import VoiceTestPanel from "./lib/VoiceTestPanel.svelte";
   import ConversationTranscript from "./lib/ConversationTranscript.svelte";
+  import { readChatCompletion, type ChatStreamProgress } from "./lib/chatStream";
 
   const DEFAULT_API_KEY = "local-dev-key";
   const DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1";
@@ -108,11 +109,11 @@
         {
           name: "model",
           type: "string",
-          defaultValue: "auto",
+          defaultValue: "gpt-6-mini (server configurable)",
           meaning:
-            "Selects the ChatGPT Web model or bridge mode. Use auto for Free/Go. Paid accounts can use discovered /v1/models entries.",
+            "Defaults to the lightweight gpt-6-mini, without thinking effort. You can select another model; use auto for accounts limited to automatic routing.",
           recommended:
-            "auto for normal apps, chatgpt-web/auto@optimized for opencode, chatgpt-deep-research for research.",
+            "Omit model for the configured lightweight default; use auto for automatic routing or chatgpt-deep-research for research.",
           gotcha:
             "This is not a full OpenAI model catalog. It maps to ChatGPT Web account capability and can fail if that account is limited.",
         },
@@ -718,7 +719,9 @@
   let projectId = $state("");
   let projectAccount = $state("");
 
-  let chatModel = $state("auto");
+  const DEFAULT_CHAT_MODEL = "gpt-6-mini";
+  let chatModel = $state(DEFAULT_CHAT_MODEL);
+  let chatDefaultLoaded = false;
   let chatPrompt = $state(
     "Reply in one sentence: the local bridge is working.",
   );
@@ -780,16 +783,16 @@
   const selectedServerAccounts = $derived(splitCsv(serverAccounts));
   const chatCurl = $derived(
     curl("POST", "/chat/completions", {
-      model: chatModel || "auto",
+      model: chatModel || DEFAULT_CHAT_MODEL,
       messages: [{ role: "user", content: chatPrompt }],
-      stream: false,
+      stream: chatFiles.length === 0,
       ...(selectedChatProject
         ? { chatgpt_project: selectedChatProject }
         : {}),
       ...(chatConversationId.trim()
         ? { conversation_id: chatConversationId.trim() }
         : {}),
-    }),
+    }, chatFiles.length === 0),
   );
   const contextMessages = $derived([
     { role: "system", content: contextSystem },
@@ -799,7 +802,7 @@
   ]);
   const contextCurl = $derived(
     curl("POST", "/chat/completions", {
-      model: chatModel || "auto",
+      model: chatModel || DEFAULT_CHAT_MODEL,
       messages: contextMessages,
       stream: false,
       ...(selectedChatProject
@@ -1015,6 +1018,12 @@
   async function loadStatus() {
     const started = performance.now();
     status = await apiFetch("/chatgpt/admin/status");
+    if (!chatDefaultLoaded) {
+      if (chatModel === DEFAULT_CHAT_MODEL) {
+        chatModel = String(status?.routing?.default_model ?? DEFAULT_CHAT_MODEL);
+      }
+      chatDefaultLoaded = true;
+    }
     apiLatencyMs = Math.max(1, Math.round(performance.now() - started));
     lastHealthCheckAt = new Date().toLocaleTimeString();
     settings = status?.settings ?? null;
@@ -1329,39 +1338,70 @@
   async function runChat() {
     await runTask("chat-test", async () => {
       chatResult = "Running...";
-      const attachments = await Promise.all(chatFiles.map(async (file) => {
-        const data = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result).split(",")[1]);
-          reader.onerror = () => reject(new Error("No se pudo leer el archivo"));
-          reader.readAsDataURL(file);
-        });
-        const format = file.name.split(".").pop()?.toLowerCase();
-        return format === "wav" || format === "mp3"
-          ? { type: "input_audio", input_audio: { data, format } }
-          : { type: "file", file: { filename: file.name, file_data: data } };
-      }));
-      const started = performance.now();
-      const payload = await apiFetch("/chat/completions", {
-        method: "POST",
-        body: JSON.stringify({
-          model: chatModel || "auto",
+      let progress: ChatStreamProgress = {
+        content: "", conversationId: chatConversationId.trim(), firstTextMs: null,
+      };
+      try {
+        const attachments = await Promise.all(chatFiles.map(async (file) => {
+          const data = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result).split(",")[1]);
+            reader.onerror = () => reject(new Error("No se pudo leer el archivo"));
+            reader.readAsDataURL(file);
+          });
+          const format = file.name.split(".").pop()?.toLowerCase();
+          return format === "wav" || format === "mp3"
+            ? { type: "input_audio", input_audio: { data, format } }
+            : { type: "file", file: { filename: file.name, file_data: data } };
+        }));
+        const started = performance.now();
+        const body = JSON.stringify({
+          model: chatModel || DEFAULT_CHAT_MODEL,
           messages: [{ role: "user", content: [{ type: "text", text: chatPrompt }, ...attachments] }],
-          stream: false,
+          stream: attachments.length === 0,
           ...(selectedChatProject
             ? { chatgpt_project: selectedChatProject }
             : {}),
           ...(chatConversationId.trim()
             ? { conversation_id: chatConversationId.trim() }
             : {}),
-        }),
-      });
-      if (payload.conversation_id) {
-        chatConversationId = String(payload.conversation_id);
+        });
+        if (attachments.length === 0) {
+          const response = await fetch(apiUrl("/chat/completions"), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+            },
+            body,
+          });
+          const result = await readChatCompletion(response, (next) => {
+            progress = next;
+            chatResult = formatChatStream(next, "procesando");
+          }, started);
+          // Updating this bound UUID starts the transcript component. Wait until
+          // the API has saved the conversation and confirmed the full stream.
+          if (result.conversationId) chatConversationId = result.conversationId;
+          chatResult = formatChatStream(result, `total: ${result.totalMs} ms`);
+        } else {
+          const payload = await apiFetch("/chat/completions", { method: "POST", body });
+          if (payload.conversation_id) chatConversationId = String(payload.conversation_id);
+          chatResult = `${Math.round(performance.now() - started)}ms\nconversation_id=${payload.conversation_id || "-"}\n\n${payload.choices?.[0]?.message?.content || JSON.stringify(payload, null, 2)}`;
+        }
+        chatFiles = [];
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        chatResult = `No se pudo completar: ${message}${progress.content ? `\n\nRespuesta parcial:\n${progress.content}` : ""}`;
+        throw error;
       }
-      chatFiles = [];
-      chatResult = `${Math.round(performance.now() - started)}ms\nconversation_id=${payload.conversation_id || "-"}\n\n${payload.choices?.[0]?.message?.content || JSON.stringify(payload, null, 2)}`;
     });
+  }
+
+  function formatChatStream(result: ChatStreamProgress, state: string) {
+    const timing = result.firstTextMs === null
+      ? "Esperando el primer texto"
+      : `Primer texto: ${result.firstTextMs} ms`;
+    return `${timing} · ${state}\nconversation_id=${result.conversationId || "-"}\n\n${result.content}`;
   }
 
   function startNewChat() {
@@ -1392,7 +1432,7 @@
       const payload = await apiFetch("/chat/completions", {
         method: "POST",
         body: JSON.stringify({
-          model: chatModel || "auto",
+          model: chatModel || DEFAULT_CHAT_MODEL,
           messages: contextMessages,
           stream: false,
           ...(selectedChatProject
@@ -1696,12 +1736,12 @@
     adminDbPath = `${root}/chatgpt-admin.sqlite`;
   }
 
-  function curl(method: string, path: string, body?: unknown) {
+  function curl(method: string, path: string, body?: unknown, stream = false) {
     const target = apiUrl(path);
     const headers = [`Authorization: Bearer ${apiKey || DEFAULT_API_KEY}`];
     if (body !== undefined) headers.push("Content-Type: application/json");
     const lines = [
-      `curl -sS -X ${method} ${quoteShell(target)} \\`,
+      `curl -sS${stream ? " -N" : ""} -X ${method} ${quoteShell(target)} \\`,
       ...headers.map((header) => `  -H ${quoteShell(header)} \\`),
     ];
     if (body !== undefined) {
@@ -3970,6 +4010,7 @@
             <p class="mt-2 text-xs text-slate-400">
               The first response fills this UUID automatically. Keep it to send
               the next message to the same conversation, or clear it to start a new one.
+              Messages without attachments display text as it arrives, with first-text and total timings.
             </p>
             <Input label="Model" bind:value={chatModel} />
             <Textarea label="Message" bind:value={chatPrompt} rows={5} />

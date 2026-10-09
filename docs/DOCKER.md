@@ -87,6 +87,18 @@ deployments where account captures are managed outside the container.
 `CHATGPT_API_KEY`
 : Bearer token required by local clients. Default example is `local-dev-key`.
 
+`CHATGPT_DEFAULT_MODEL`
+: Ordinary-chat default when clients omit `model`; initially `gpt-6-mini`, a
+  lightweight model validated locally. Explicit models, including `auto`, take
+  precedence. Check observed entries in `/v1/models`; `source: configured`
+  alone does not confirm account support. Change this value when your account
+  needs another model. The live voice model remains automatic.
+
+`CHATGPT_PARALLEL_PREPARATION`
+: Default `true`. Runs fresh prepare/requirements requests in parallel without
+  token caching or extra requests. Set `false` for the sequential baseline.
+  See [request metrics](REQUEST_METRICS.md) for measurement and comparison.
+
 `BRIDGE_CONSOLE_PORT`
 : Host port for the operator console. Default `8080`. The container serves
   prebuilt static files through nginx on internal port `80`.

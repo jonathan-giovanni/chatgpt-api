@@ -16,13 +16,25 @@ CHATGPT_API_KEY=local-dev-key chatgpt-api serve --port 8000
 ```text
 baseURL = http://127.0.0.1:8000/v1
 apiKey  = local-dev-key
-model   = auto
+model   = gpt-6-mini
 ```
 
 Use `model = auto` when you want ChatGPT Web to choose the model like the web UI
 does. Use explicit models such as `gpt-5-5` when you want model limit or
 availability failures to surface clearly instead of being hidden by web-side
 fallback behavior.
+
+If an ordinary chat request omits `model`, the bridge uses the configured
+`CHATGPT_DEFAULT_MODEL` (or server `--default-model`), initially `gpt-6-mini`.
+An explicit `model`, including `auto`, takes precedence. This lightweight
+default was validated locally; availability and relative latency depend on the
+account and workload. `/v1/models` lists the configured account capabilities.
+Live voice model selection remains automatic upstream.
+
+Ordinary text turns fetch fresh prepare/requirements in parallel by default.
+They do not cache validation tokens or authentication, and the conversation
+stream retains its existing transport. For
+timings and controlled comparisons, see [request metrics](REQUEST_METRICS.md).
 
 ## Later Official OpenAI Endpoint
 
@@ -129,6 +141,7 @@ Representative aliases:
 
 ```text
 auto
+gpt-6-mini
 gpt-5-5
 gpt-5-5-thinking-standard
 gpt-5-5-thinking-extended
@@ -145,7 +158,12 @@ chatgpt-deep-research
 
 Rules:
 
-- `auto` is the safest default and should be used for Free/Go accounts.
+- An omitted ordinary-chat model uses the configured lightweight default,
+  initially `gpt-6-mini`; it still requires account support.
+- Use explicit `auto` to let ChatGPT choose an available model for the account.
+- `/v1/models` includes the configured default even if it was not observed in
+  the account catalog. Its `chatgpt.source: configured` metadata does not
+  confirm account support.
 - `gpt-5-5*`, `gpt-5-5-thinking-*`, and `gpt-5-5-pro-*` require account support.
 - `@optimized` and `@opencode` are agent prompt bridge suffixes for tool-calling
   clients such as opencode.
@@ -763,8 +781,8 @@ Keep this document honest as behavior changes.
 
 ## Registro dinámico y migración
 
-`GET /v1/models` se construye a partir de las capturas locales. `auto` es el
-valor recomendado: deja que ChatGPT resuelva el modelo disponible para la
+`GET /v1/models` se construye a partir de las capturas locales. `auto` explícito
+deja que ChatGPT resuelva el modelo disponible para la
 cuenta. Los slugs observados se publican con su familia real y, cuando procede,
 con aliases de esfuerzo como `-standard`, `-extended` y `-max`.
 
@@ -774,5 +792,8 @@ confirmó `gpt-5-6-thinking` con esfuerzo `extended`. La familia histórica
 `gpt-5-5*` se conserva para clientes existentes, marcada como deprecated y con
 `auto` como migración. La ausencia de un slug en una captura no demuestra que
 ChatGPT lo haya retirado globalmente; indica que el bridge no debe prometerlo
-para esa cuenta. Si una petición omite `model`, el bridge usa `auto`.
+para esa cuenta. Si una petición de chat omite `model`, el bridge usa
+`CHATGPT_DEFAULT_MODEL` o `--default-model`, inicialmente `gpt-6-mini`. Un
+`model` explícito se conserva; la selección del modelo de voz sigue siendo
+automática en ChatGPT.
 

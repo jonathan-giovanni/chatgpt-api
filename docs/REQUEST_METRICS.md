@@ -22,7 +22,7 @@ request; the benchmark also measures the client's end-to-end elapsed time.
 | `local.conversation_lookup`, `local.project_lookup` | Local SQLite lookup; no ChatGPT history/context fetch |
 | `local.model_account_selection`, `local.capture_load_provider` | Local model/account settings and decrypting/loading the capture |
 | `local.account_routing`, `local.bridge_settings` | Account routing and local concurrency configuration reads |
-| `local.admin_store_initialize` | SQLite schema initialization, once per database path within each chat request |
+| `local.admin_store_initialize` | SQLite schema-version check, once per database path within each chat request; DDL runs only when the schema needs initialization |
 | `queue.chat`, `queue.account` | Time waiting to acquire the local concurrency semaphores |
 | `local.payload_and_uploads` | Building the upstream payload; includes uploads if files exist |
 | `upstream.prepare`, `upstream.requirements` | Separate HTTP requests preceding the conversation |
@@ -55,39 +55,58 @@ For ordinary text chat with a known Project, the usual successful path is:
 4. POST the conversation and relay its streamed text.
 5. Save the latest parent message and conversation binding locally.
 
-By default, new chats and continuations both refresh prepare/requirements. A Project's
+New chats and continuations both refresh prepare/requirements; the two fresh
+HTTP calls run in parallel by default. A Project's
 instructions/history are resolved upstream using its ID. The wrapper does not
 download and prepend Project context to ordinary text requests. A missing
 parent message may cause a final conversation snapshot; files, errors,
 research, and tools have other paths and can add HTTP calls. Inspect the trace
 for the actual request rather than assuming every route follows the text path.
 
-The current transport uses a fresh curl session for each `requests.post/get`
-call. Session timings therefore include network connection setup. The marks
+The transport uses fresh curl sessions. Both preparation requests still run
+in parallel; authentication and proof validation remain fresh on every turn.
+There is no token, response, or persistent authentication cache. The marks
 locate time spent waiting for upstream text versus local preparation, but do
 not distinguish ChatGPT's internal computation from network/server queue time.
 `supports_buffering` is inherited from the capture and defaults to `true`;
 first-text timing is when the wrapper receives text, not an internal model
 token timestamp.
 
-The transport stops parsing at upstream `[DONE]`, explicitly closes the HTTP
-response, saves the conversation parent, and sends the downstream completion
-marker. An earlier message status change alone cannot safely terminate a
+The conversation POST always uses the existing fresh-session `stream=True`
+path and relays assistant text as it arrives. At upstream `[DONE]`, it stops
+parsing SSE events and explicitly closes the response. The bridge then saves
+the conversation parent and sends the downstream completion marker. An earlier
+message status change alone cannot safely terminate a
 conversation stream: tool messages or a WebSocket handoff may follow. Handoffs
-observed before `[DONE]` are still followed. The HTTP library's `close()` can
-itself wait for its background network task, so stopping parsing does **not**
-guarantee an equivalent reduction in elapsed time.
+observed before `[DONE]` are still followed. Response close can wait for the
+library's background network task; stopping parsing does not guarantee an
+equivalent reduction in elapsed time. Experimental HTTP pooling and a
+conversation-callback path were removed after controlled comparisons did not
+establish faster replies. The working conversation stream and its completion
+semantics are preserved.
 
 Measure **last text to message finished**, **message finished to upstream done**,
-**done to stream closed**, and **closed to client completion** separately. With
-the EOF control enabled, also measure **done to EOF**. A missing `upstream_eof`
-mark is expected when parsing stops on `[DONE]`. A client using `stream: false`
-waits for the full reply and finalization before receiving its JSON response.
+**done to stream closed**, and **closed to client completion** separately. A
+missing `upstream_eof` mark is expected when parsing stops on `[DONE]`. A client
+using `stream: false` waits for the full reply and finalization before receiving
+its JSON response.
+
+Bridge Console Test Lab uses `stream: true` for ordinary text without
+attachments. It renders incoming text deltas and reports first-text and total
+elapsed time, while preserving the selected Project and continuation UUID.
+Its SSE reader consumes the response through EOF and handles `[DONE]` without
+truncating the text. Requests with attachments retain their existing JSON
+response path. Streaming lets users see available text earlier; it does not
+make ChatGPT generate the answer faster.
 
 Local settings are read while routing and setting concurrency limits. Chat
-requests now reuse the `BridgeAdminStore` instance within that request, avoiding
-repeated schema initialization. Its queries still read SQLite, and the next
-request creates a fresh instance; settings and Project rows are not cached.
+requests reuse the `BridgeAdminStore` instance within that request, avoiding
+repeated schema checks. `PRAGMA user_version` skips DDL once the schema is
+initialized, and SQLite connections are explicitly closed after each operation.
+Single-account routing skips metadata reads needed only for ordering an account
+pool. Concurrency configuration is resolved once per request. Queries still read
+SQLite, and the next request reads current settings; settings and Project rows
+are not persistently cached.
 The latest parent is persisted **before** completing the downstream response.
 Docker bind
 mount I/O is included in these local timings. A slow local span does not by
@@ -130,56 +149,46 @@ first text, completion, and internal preparation. Separate error samples and
 report response length along with averages/medians. These observations do not
 establish universal performance for other Projects or models.
 
-## Preparation and stream controls
+## Preparation and model defaults
 
 These provider-specific switches work for JSON and streamed ordinary chat:
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `CHATGPT_PARALLEL_PREPARATION` | `false` | Opt in to overlapping fresh prepare/requirements HTTP calls. Both use the original captured session headers; requirements does not consume the prepare response. No additional retry or request is introduced. |
-| `CHATGPT_REQUIREMENTS_CACHE_TTL_SECONDS` | `0` | Experimental, process-local requirements/proof reuse; `0` disables it, values are capped at 900 seconds. Prepare is always fresh. |
+| `CHATGPT_PARALLEL_PREPARATION` | `true` | Overlap fresh prepare/requirements HTTP calls. Both use the original captured session headers; requirements does not consume the prepare response. No additional retry or request is introduced. Set `false` for the sequential baseline. |
 | JSON `chatgpt_parallel_preparation` | Environment default | Boolean override for comparing sequential and parallel preparation. |
-| JSON `chatgpt_reuse_requirements` | Environment TTL | `false` forces fresh requirements; `true` permits reuse only if a nonzero TTL is configured and the entry is eligible. |
-| JSON `chatgpt_stream_close_on_done` | `true` | `false` consumes EOF as a diagnostic baseline; `true` stops parsing at `[DONE]` and closes the response. |
+| `CHATGPT_DEFAULT_MODEL` / server `--default-model` | `gpt-6-mini` | Lightweight ordinary-chat default when the client omits `model`; an explicit model, including `auto`, is preserved. `/v1/models` lists observed models and the configured default; `source: configured` alone does not confirm account support. |
 
-Cache entries bind to the successfully returned conversation UUID. They are
-isolated by session/credential fingerprint, browser identity, model, Project,
-thinking effort, and temporary-chat mode. Hits do not extend their original
-expiry. The cache holds at most 128 entries in RAM, does not write tokens to
-disk, and is cleared on restart. Credential changes create a different scope.
+Requirements/proof caching, HTTP pooling, callback streaming and their
+experimental controls were removed. Cache trials had no eligible hits, and
+the transport comparisons did not establish faster replies. Session validation
+remains fresh on every turn. The conversation transport stops parsing at
+`[DONE]` and closes its response. No extra speculative request or retry is
+added for performance.
 
-**An interactive CAPTCHA/Arkose/Turnstile requirement makes the result
-ineligible for caching.** No challenge is bypassed. An explicit invalid-token
-JSON error before stream acceptance invalidates the entry and allows one fresh
-attempt; other HTTP rejections invalidate it without that replay. Network
-timeouts and ambiguous failures do not trigger a token-cache retry. The
-900-second TTL is an experimental client limit, not a documented upstream
-validity guarantee. A run with zero cache hits cannot establish token reuse
-or its latency benefit.
+`gpt-6-mini` was validated in the local comparison, not established as the
+fastest model for every account or workload. Change the configured default if
+your account lacks that model; use explicit `auto` to delegate model selection
+to ChatGPT. The live voice handshake still lets ChatGPT select its voice model.
 
 ## Paired comparison with and without a Project
 
 Use the same synthetic prompt, model, account and target output length for
-both scopes. Configure timings and the experimental TTL locally, then run:
+both scopes. Enable request timings locally, then run:
 
 ```sh
-python scripts/benchmark_chat_reuse.py \
+python scripts/benchmark_chat_preparation.py \
   --project "<configured Project name>" --model "<model from /v1/models>" \
   --prompt-file outputs/test-prompt.txt --pairs 10
 ```
 
 This creates 10 Project threads and 10 ordinary threads in the Project's account.
-Each thread gets a seed turn plus four continuations: fresh/cached requirements
-crossed with EOF/DONE termination. Scope order alternates and continuation
-order rotates. Confirm actual `facts.requirements_cache_hit`, response length,
-all upstream status codes and UUID continuity before comparing timings.
+Each thread gets a seed turn plus two continuations: sequential and parallel
+fresh preparation, for 60 requests in total. Scope order alternates and
+continuation order rotates. Confirm `facts.parallel_preparation`, response
+length, all upstream status codes and UUID continuity before comparing timings.
 
-Add `--age-probes` to check original cached tokens at 5, 10, approximately
-14.75 minutes and after the 15-minute client expiry. These probes do not
-demonstrate reuse if challenges make the entry ineligible. If caching is
-ineligible, use `--parallel-controls` instead to compare sequential/parallel
-fresh preparation crossed with EOF/DONE termination. Do not combine those
-modes to claim a token age guarantee. `--resume-from` can reuse initial UUIDs
+`--resume-from` can reuse initial UUIDs
 from a local interrupted run, with a new warmup; it never automatically replays
 an unfinished request. Report those warmups separately from first-turn data.
 `--continue-results` appends after recorded cases, including failures, without
@@ -187,5 +196,69 @@ replaying them; it rejects changing models within the output. Use a separate
 output directory if the chosen model hits a usage limit and another model is
 needed. Keep failures separate from latency averages for successful replies.
 
-Results stay under ignored `outputs/requirements-cache/`. Server logs have no
+Results stay under ignored `outputs/chat-preparation/`. Server logs have no
 content or identities; local client results include private UUIDs and text.
+
+## Validation and discarded experiments: 2026-10-09
+
+After the initial preparation comparison, 112 additional `gpt-6-mini` follow-ups
+completed successfully on 10 existing conversation UUIDs. They comprised 50
+callback/pooling trials, 12 framing checks, and 50 preparation-only pooling
+trials. There were 24 warmups and 88 comparison requests, with stable UUIDs,
+one provider attempt per request, and equal output lengths. Warmups are excluded
+from the following means; each listed experiment compares 20 controls with 20
+variant requests.
+
+| Discarded experiment | Mean first text, control → variant | Mean full response, control → variant | Observed change in full response |
+| --- | ---: | ---: | --- |
+| Pooled HTTP and callback conversation stream | 3,818 → 3,812 ms | 6,197 → 6,887 ms | 11.13% higher |
+| Pooling only prepare/requirements | 3,757 → 4,422 ms | 5,933 → 6,881 ms | 15.98% higher |
+
+Neither experiment established a response-latency benefit. Bootstrap intervals
+resampled conversation UUIDs and crossed zero for the combined first-text and
+completion differences. These observed increases do not prove that pooling
+caused the delay: upstream server/network variability remained substantial.
+The preparation-only experiment's median preparation was 378.711 versus
+378.504 ms, effectively unchanged, despite successful connection reuse. Both
+pooling implementations and the callback experiment were removed.
+
+The earlier 100-response run used 20 new conversations and 80 continuation
+controls. Fresh parallel preparation reduced its combined mean preparation
+time by 28.2%, but mean full response time was 1.4% higher; it did not establish
+an overall reply-time improvement. Parallel preparation remains because it
+overlaps independent mandatory calls without caching or adding requests.
+
+The largest callback-trial response took 16.58 s: 11.34 s elapsed between the
+last text and `[DONE]`, while `[DONE]` to body EOF took only 1.64 ms. This places
+the main delay before the upstream termination marker rather than in local
+HTTP cleanup; it cannot distinguish network waiting from server processing.
+An earlier message-completion status is not used to truncate the stream.
+Inputs, account/Project identifiers and complete traces remain ignored and
+local; only generic numeric results are published here.
+
+### Local database comparison
+
+A separate synthetic benchmark ran in Docker against a Windows bind-mounted
+SQLite database. It alternated 100 before/after pairs after 10 warmup pairs,
+timing store initialization and one settings read. Garbage collection ran
+outside the timed spans; old connections were allowed their original deferred
+cleanup, while the new path includes explicit connection closure.
+
+| Local operation | Mean before → after | Median before → after | Mean reduction |
+| --- | ---: | ---: | ---: |
+| Store initialization plus one settings read | 37.670 → 24.872 ms | 35.774 → 24.936 ms | 33.97% (12.798 ms) |
+| Store initialization alone | 31.306 → 14.709 ms | 29.192 → 14.780 ms | 53.02% (16.597 ms) |
+| Settings read alone | 6.365 → 10.162 ms | 5.660 → 9.908 ms | 59.65% higher |
+
+The full local operation saved about 13 ms on average, despite a slower
+individual settings read. This benchmark measures local database work only;
+it does not establish a reduction in total ChatGPT response time. Request-local
+store reuse and a single concurrency-settings lookup also avoid repeated work,
+but their additional savings are not isolated by this comparison.
+
+In the latest fresh-session control group above, mean first-text and completion
+times were 3,757 and 5,933 ms. That leaves a 2.18 s average interval during which
+a streaming client can display received text before a buffered JSON client
+would receive its complete response. This is a delivery opportunity observed
+in those traces, not a measured reduction in model generation time or a new
+browser benchmark.

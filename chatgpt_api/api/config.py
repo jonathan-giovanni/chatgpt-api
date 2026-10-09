@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from chatgpt_api.providers.chatgpt.models import DEFAULT_CHAT_MODEL
+
 
 @dataclass(frozen=True, slots=True)
 class OpenAICompatConfig:
@@ -14,7 +16,7 @@ class OpenAICompatConfig:
     host: str = "127.0.0.1"
     port: int = 8000
     api_key: str | None = None
-    impersonate: str = "safari18_4"
+    impersonate: str = "safari184"
     agent_prompt_mode: str = "optimized"
     account_strategy: str = "auto"
     model_fallback: str | None = "auto"
@@ -28,3 +30,4 @@ class OpenAICompatConfig:
     upload_concurrency: str | None = None
     image_concurrency: str | None = None
     research_concurrency: str | None = None
+    default_model: str = DEFAULT_CHAT_MODEL
