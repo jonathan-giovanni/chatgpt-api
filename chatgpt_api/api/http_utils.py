@@ -32,7 +32,7 @@ def read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
 
 def send_cors_headers(handler: BaseHTTPRequestHandler) -> None:
     handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
     handler.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
     handler.send_header("Access-Control-Expose-Headers", "X-ChatGPT-Operation-Id")
 

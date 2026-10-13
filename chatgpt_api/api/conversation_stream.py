@@ -131,6 +131,12 @@ class ConversationStreams:
             self.feeds.move_to_end(session_id)
             return feed
 
+    def discard(self, conversation_id: str) -> None:
+        with self._lock:
+            self.channels.pop(conversation_id, None)
+            for key in [key for key, feed in self.feeds.items() if feed.conversation_id == conversation_id]:
+                self.feeds.pop(key, None)
+
     def release(self, session_id: str) -> None:
         with self._lock:
             self.feeds.pop(session_id, None)

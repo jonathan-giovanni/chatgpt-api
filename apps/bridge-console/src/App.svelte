@@ -1410,6 +1410,15 @@
     chatFiles = [];
   }
 
+  async function deleteChat() {
+    const id = chatConversationId.trim();
+    if (!id || !window.confirm("¿Eliminar esta conversación de ChatGPT? Esta acción no se puede deshacer.")) return;
+    await runTask("delete-chat", async () => {
+      await apiFetch(`/chatgpt/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
+      startNewChat();
+    });
+  }
+
   function selectChatFiles(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
     const files = Array.from(input.files || []);
@@ -4045,6 +4054,13 @@
                 disabled={!chatConversationId.trim() || Boolean(busy)}
               >
                 New conversation
+              </button>
+              <button
+                class="rounded-2xl border border-rose-400/30 px-4 py-3 font-black text-rose-300"
+                onclick={deleteChat}
+                disabled={!chatConversationId.trim() || Boolean(busy)}
+              >
+                Eliminar conversación
               </button>
             </div>
             {#if chatFiles.length === 0}<CodeBlock title="curl" code={chatCurl} />{/if}

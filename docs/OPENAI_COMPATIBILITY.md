@@ -60,6 +60,8 @@ POST /v1/chatgpt/voice/sessions/{bridge_session_id}/events
 POST /v1/chatgpt/voice/sessions/release
 GET  /v1/chatgpt/conversations/{uuid}/messages
 GET  /v1/chatgpt/conversations/{uuid}/events
+GET  /v1/chatgpt/conversations
+DELETE /v1/chatgpt/conversations/{uuid}
 POST /v1/images/generations
 POST /v1/images/edits
 POST /v1/chatgpt/vision
@@ -131,6 +133,31 @@ Supported response shapes:
 - image edit/composite responses with one saved output image
 - vision/OCR responses with text in `text` and `choices[0].message.content`
 - Deep Research responses with a saved markdown report path and download URL
+
+## Listing and deleting conversations
+
+Use `GET /v1/chatgpt/conversations?account=work&limit=100` to list one account.
+Follow `next_offset` until it is null. `archived=true` lists archived chats;
+`outside_projects=true` filters each page, so an empty filtered page may still
+have a next page. `total` is the upstream total before filtering.
+
+Delete one UUID with the same bearer key:
+
+```sh
+curl -X DELETE -H "Authorization: Bearer <bridge-key>" \
+  "http://127.0.0.1:8000/v1/chatgpt/conversations/<UUID>?account=work&outside_projects=true"
+```
+
+The guard reads current membership and refuses Project chats or unknown
+membership (409). Omit it only when intentionally deleting a specific UUID
+regardless of its Project. Deletion is irreversible; the bridge removes its
+local continuation and cached timeline only after ChatGPT confirms success.
+Unknown UUIDs return 404. Account selection never fails over: supply `account`
+when multiple accounts exist and the UUID has no saved local association.
+These routes use ChatGPT Web's private interface and may change upstream.
+
+Test Lab exposes **Eliminar conversación** for the current UUID and clears
+the chat and transcript after successful deletion.
 
 ## Model Aliases
 

@@ -270,6 +270,50 @@ class ChatGPTWebTransport:
             return current_node
         return _latest_message_id_from_value(payload)
 
+    def list_conversations(self, *, offset: int = 0, limit: int = 100, archived: bool = False) -> dict[str, Any]:
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("offset must be nonnegative and limit must be between 1 and 100")
+        payload = self._conversation_management_request("get", "/backend-api/conversations", params={
+            "offset": offset, "limit": limit, "order": "updated", "is_archived": str(archived).lower(),
+        })
+        if not isinstance(payload.get("items"), list) or not isinstance(payload.get("total"), int):
+            raise ProviderError("ChatGPT conversation list returned an invalid response")
+        return payload
+
+    def delete_conversation(self, conversation_id: str) -> None:
+        conversation_id = str(uuid.UUID(conversation_id))
+        payload = self._conversation_management_request(
+            "patch", f"/backend-api/conversation/{conversation_id}", payload={"is_visible": False},
+        )
+        if payload.get("success") is not True:
+            raise ProviderError("ChatGPT did not confirm conversation deletion")
+
+    def _conversation_management_request(
+        self, method: str, path: str, *, params: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.ensure_configured()
+        from curl_cffi import requests
+
+        headers = _conversation_headers(self.auth.request_headers())
+        headers["accept"] = "application/json"
+        if payload is not None:
+            headers["content-type"] = "application/json"
+        try:
+            response = getattr(requests, method)(
+                f"{self.endpoints.base_url}{path}", headers=headers, params=params,
+                **({"json": payload} if payload is not None else {}),
+                impersonate=self.impersonate, timeout=min(self.timeout, 30.0),
+            )
+        except Exception as exc:
+            raise ProviderError("ChatGPT conversation management request failed") from exc
+        try:
+            if response.status_code >= 400:
+                raise ProviderError(f"ChatGPT conversation management failed: {response.status_code}")
+            return _json_response(response)
+        finally:
+            response.close()
+
     @timed("upstream.conversation_snapshot")
     def conversation_snapshot(self, conversation_id: str) -> dict[str, Any] | None:
         """Read a conversation without sending a new message to ChatGPT."""

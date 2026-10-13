@@ -110,6 +110,7 @@ usage, expiry dates, private Project IDs, or credentials.
 | --- | --- | --- |
 | Chat and streaming | `POST /v1/chat/completions` | implemented |
 | Optional Project and conversation UUID | `chatgpt_project`, `conversation_id`; Console Projects and Test Lab | implemented; omitted Project creates a chat outside Projects; omitted UUID starts a new conversation |
+| Conversation listing and deletion | `GET /v1/chatgpt/conversations`, `DELETE /v1/chatgpt/conversations/{uuid}`; Test Lab | implemented; paginated per account, archived filter, optional outside-Projects protection; deletion removes the upstream chat and local continuation |
 | Mixed file attachments | chat content parts and initial voice `files` | implemented for UTF-8 text, PDF, DOCX/XLSX/PPTX, PNG/JPEG/WebP/GIF, WAV/MP3; 10 files, 20 MiB each, 25 MiB total |
 | Voice conversation text | `GET /v1/chatgpt/conversations/{uuid}/messages` and `/events` | on-demand history plus SSE updates from wrapper-owned WebRTC/SIP data channels; audio with no upstream transcript has no text |
 | WebRTC voice | `POST /v1/chatgpt/voice/sessions`; Test Lab | experimental ChatGPT Web signalling; microphone or local audio file; Arbor sends `fathom` |
@@ -138,6 +139,8 @@ usage, expiry dates, private Project IDs, or credentials.
 ## Recent Contributions
 
 Recent project updates include:
+
+- **Conversation deletion:** account-scoped pagination and deletion by UUID, including a Test Lab button. `outside_projects=true` verifies membership before deleting and rejects Projects or unknown membership. No automatic deletion retry or account failover. Validated on **2026-10-13** with 368 backend tests and a Console build with no Svelte errors or warnings. See [conversation management](docs/OPENAI_COMPATIBILITY.md#listing-and-deleting-conversations).
 
 - **Chrome account connector:** a Manifest V3 extension checks localhost before an optional LAN IP, automatically links a matching existing account from a normal Chrome ChatGPT session, and refreshes its encrypted capture. Its pulse icon shows health and toggles automatic renewal two days before expiry; the dashboard header reflects account status. See [Chrome connector](docs/CHROME_EXTENSION.md) for setup and limits.
 
@@ -770,6 +773,8 @@ Admin routes are local operator endpoints. Full request and response details:
 | `POST /v1/chatgpt/voice/sessions` | JSON with `offer_sdp`, `voice`, and optional `project`, `conversation_id`, `model`, `text`, and `files` (files require text). | Experimental: uses ChatGPT Web's private voice signalling. | `{"offer_sdp":"v=0\r\nm=audio ...","voice":"fathom"}` |
 | `POST /v1/chatgpt/voice/sessions/release` | JSON with `bridge_session_id`. | Implemented; releases the local voice binding. | `{"bridge_session_id":"vs_<id>"}` |
 | `GET /v1/chatgpt/conversations/{uuid}/messages` | JSON response with ordered `messages` (`id`, `role`, `text`, `created_at`, `status`) and `untranscribed_audio_messages`; optional `?account=<alias>`. | Implemented read-only history snapshot, on demand. | `GET /v1/chatgpt/conversations/<UUID>/messages` |
+| `GET /v1/chatgpt/conversations` | Paginated JSON: `items`, `total`, `next_offset`; `account`, `offset`, `limit` (1–100), `archived=true`, `outside_projects=true`. | Implemented account-scoped listing. Filtering does not change the upstream pagination; continue until `next_offset` is null, even if a filtered page is empty. | `GET /v1/chatgpt/conversations?account=work&outside_projects=true` |
+| `DELETE /v1/chatgpt/conversations/{uuid}` | JSON `{id, account, deleted: true}`; optional `account` and `outside_projects=true`. | Implemented deletion in ChatGPT, then removal of the local continuation and cached timeline. The outside-Projects guard checks current membership and rejects Projects or unknown membership with HTTP 409. No account failover or automatic deletion retries. Test Lab has **Eliminar conversación** with confirmation. | `DELETE /v1/chatgpt/conversations/<UUID>?account=work&outside_projects=true` |
 | `GET /v1/chatgpt/conversations/{uuid}/events` | Authenticated SSE: initial `snapshot`, then `message` upserts with the same message fields. | Experimental live voice stream from calls made through the wrapper; no upstream polling. Shared WebRTC/SIP stream, cached reconnects, optional `?refresh=1` for an explicit history reload. | `curl -N -H "Authorization: Bearer <bridge-key>" http://127.0.0.1:8000/v1/chatgpt/conversations/<UUID>/events` |
 | `POST /v1/chatgpt/voice/sessions/{bridge_session_id}/events` | JSON `sequence` and `events` (1–50 data channel events, at most 512 KiB). | Implemented event ingestion; automatic in Test Lab and SIP. Ordered sequences make retries idempotent. External WebRTC clients forward received events here. | `{"sequence":0,"events":[{"type":"data_message","data":"<received JSON>"}]}` |
 | `POST /v1/chat/completions` (conversation continuation) | JSON or SSE (`"stream": true`); supports `chatgpt_project` and `conversation_id`. | Implemented; UUID continues the same conversation and Project. | `{"model":"auto","chatgpt_project":"INCIDENCIAS","conversation_id":"<UUID>","messages":[...]}` |
