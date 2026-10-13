@@ -77,7 +77,7 @@ from chatgpt_api.providers.chatgpt.projects import (
     validate_project_mapping,
 )
 from chatgpt_api.providers.chatgpt.conversation_history import conversation_timeline
-from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport, normalize_impersonate_profile
+from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport, ConversationNotFound, normalize_impersonate_profile
 from chatgpt_api.providers.chatgpt.preparation import chat_policy
 from chatgpt_api.providers.chatgpt.voice import (
     VoiceSignallingError, bind_conversation, bound_session, negotiate_voice, release_session,
@@ -1060,6 +1060,110 @@ def _conversation_messages_response(
     return 404, {"error": {"message": "conversation not found", "type": "not_found"}}
 
 
+def _conversation_is_project(snapshot: dict[str, Any]) -> bool | None:
+    gizmo = snapshot.get("gizmo_id")
+    if (isinstance(gizmo, str) and gizmo.startswith("g-p-")) or snapshot.get("gizmo_type") == "snorlax":
+        return True
+    if snapshot.get("project_id") or snapshot.get("memory_scope") in {"project", "project_v2"}:
+        return True
+    if "gizmo_id" in snapshot and (gizmo is None or isinstance(gizmo, str)):
+        return False
+    return None
+
+
+def _conversation_management_account(
+    config: OpenAICompatConfig, router: AccountRouter, requested: str | None,
+    conversation_id: str | None = None,
+) -> str:
+    session = _admin_store(config).get_conversation_session(conversation_id) if conversation_id else None
+    if not requested:
+        requested = session["account"] if session else router.accounts[0] if len(router.accounts) == 1 else None
+    account = next((value for value in router.accounts if requested and value.lower() == requested.lower()), None)
+    if account is None:
+        raise ValueError("specify a configured account using ?account=<alias>")
+    if session and session["account"] != account:
+        raise ValueError("conversation_id belongs to another account")
+    return account
+
+
+def _conversation_list_response(config: OpenAICompatConfig, router: AccountRouter, query: dict[str, list[str]]) -> tuple[int, dict[str, Any]]:
+    try:
+        account = _conversation_management_account(config, router, _query_value(query, "account") or None)
+        offset = int(_query_value(query, "offset", "0"))
+        limit = int(_query_value(query, "limit", "100"))
+        archived = _conversation_query_flag(query, "archived")
+        outside = _conversation_query_flag(query, "outside_projects")
+        page = _provider_for_account(config, account).transport.list_conversations(offset=offset, limit=limit, archived=archived)
+        items = [{**{key: item.get(key) for key in ("id", "title", "create_time", "update_time", "gizmo_id", "is_archived")},
+                  "is_project": _conversation_is_project(item)} for item in page["items"] if isinstance(item, dict)]
+        return 200, {"object": "list", "account": account,
+                     "items": [item for item in items if not outside or item["is_project"] is False],
+                     "total": page["total"], "offset": offset, "limit": limit,
+                     "next_offset": offset + len(page["items"]) if offset + len(page["items"]) < page["total"] else None}
+    except (ValueError, TypeError) as exc:
+        return 400, {"error": {"message": str(exc), "type": "invalid_request_error"}}
+    except ProviderError as exc:
+        return _provider_error_status_and_payload(exc)
+
+
+def _conversation_query_flag(query: dict[str, list[str]], key: str) -> bool:
+    value = _query_value(query, key, "false")
+    if value not in {"true", "false"}:
+        raise ValueError(f"{key} must be true or false")
+    return value == "true"
+
+
+def _conversation_delete_response(
+    config: OpenAICompatConfig, router: AccountRouter, streams: ConversationStreams,
+    conversation_id: str, query: dict[str, list[str]],
+) -> tuple[int, dict[str, Any]]:
+    try:
+        conversation_id = str(uuid.UUID(conversation_id))
+        account = _conversation_management_account(config, router, _query_value(query, "account") or None, conversation_id)
+        outside = _conversation_query_flag(query, "outside_projects")
+        transport = _provider_for_account(config, account).transport
+        if outside:
+            snapshot = transport.conversation_snapshot(conversation_id)
+            if snapshot is None:
+                return 404, {"error": {"message": "conversation not found", "type": "not_found"}}
+            session = _admin_store(config).get_conversation_session(conversation_id)
+            if _conversation_is_project(snapshot) is not False or (session and session.get("project_id")):
+                return 409, {"error": {"message": "conversation belongs to a Project or its membership is unknown", "type": "project_protected"}}
+        transport.delete_conversation(conversation_id)
+        _admin_store(config).delete_conversation_session(conversation_id)
+        streams.discard(conversation_id)
+        return 200, {"object": "chatgpt.conversation", "id": conversation_id, "account": account, "deleted": True}
+    except ConversationNotFound:
+        return 404, {"error": {"message": "conversation not found", "type": "not_found"}}
+    except (ValueError, TypeError) as exc:
+        return 400, {"error": {"message": str(exc), "type": "invalid_request_error"}}
+    except ProviderError as exc:
+        return _provider_error_status_and_payload(exc)
+
+
+def _conversation_delete_all_response(
+    config: OpenAICompatConfig, router: AccountRouter, streams: ConversationStreams,
+    query: dict[str, list[str]],
+) -> tuple[int, dict[str, Any]]:
+    try:
+        requested = _query_value(query, "account")
+        if not requested or not _conversation_query_flag(query, "all"):
+            raise ValueError("bulk deletion requires ?account=<alias>&all=true")
+        if _conversation_query_flag(query, "outside_projects"):
+            raise ValueError("bulk deletion includes Project conversations; use guarded deletion by UUID instead")
+        account = _conversation_management_account(config, router, requested)
+        _provider_for_account(config, account).transport.delete_all_conversations()
+        _admin_store(config).delete_account_conversation_sessions(account)
+        streams.discard_account(account)
+        return 200, {"object": "chatgpt.conversations", "account": account, "deleted": True, "all": True}
+    except (ValueError, TypeError) as exc:
+        return 400, {"error": {"message": str(exc), "type": "invalid_request_error"}}
+    except ConversationNotFound:
+        return 404, {"error": {"message": "upstream bulk deletion is unavailable", "type": "not_found"}}
+    except ProviderError as exc:
+        return _provider_error_status_and_payload(exc)
+
+
 def _ingest_voice_events(
     config: OpenAICompatConfig, streams: ConversationStreams, session_id: str, body: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1280,6 +1384,10 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
             if path == "/v1/models":
                 _send_json(self, 200, _models_response(config))
                 return
+            if path == "/v1/chatgpt/conversations":
+                status, payload = _conversation_list_response(config, router, query)
+                _send_json(self, status, payload)
+                return
             attachment_batch = re.fullmatch(r"/v1/chatgpt/voice/attachments/(sa_[a-f0-9]{32})", path)
             if attachment_batch:
                 try:
@@ -1345,6 +1453,27 @@ def _handler_class(config: OpenAICompatConfig, router: AccountRouter | None = No
                 _send_json(self, status, payload)
                 return
             _send_json(self, 404, {"error": {"message": "not found", "type": "not_found"}})
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            if not _authorize(self, config.api_key):
+                return
+            parsed_url = urlparse(self.path)
+            if parsed_url.path == "/v1/chatgpt/conversations":
+                with _admin_store_scope():
+                    status, payload = _conversation_delete_all_response(
+                        config, router, conversation_streams, parse_qs(parsed_url.query)
+                    )
+                _send_json(self, status, payload)
+                return
+            match = re.fullmatch(r"/v1/chatgpt/conversations/([^/]+)", parsed_url.path)
+            if not match:
+                _send_json(self, 404, {"error": {"message": "route not found", "type": "not_found"}})
+                return
+            with _admin_store_scope():
+                status, payload = _conversation_delete_response(
+                    config, router, conversation_streams, match.group(1), parse_qs(parsed_url.query)
+                )
+            _send_json(self, status, payload)
 
         def do_POST(self) -> None:  # noqa: N802
             enabled = (

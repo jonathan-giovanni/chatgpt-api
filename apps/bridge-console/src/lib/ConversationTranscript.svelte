@@ -34,6 +34,9 @@
     if (id && id !== lastVoiceId) {
       lastVoiceId = id;
       lookupId = id;
+    } else if (!id && lastVoiceId) {
+      if (lookupId === lastVoiceId) lookupId = "";
+      lastVoiceId = "";
     }
   });
 
