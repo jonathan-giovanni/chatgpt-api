@@ -11,7 +11,7 @@ from chatgpt_api.api.config import OpenAICompatConfig
 from chatgpt_api.api.conversation_stream import ConversationStreams
 from chatgpt_api.core.errors import ProviderError
 from chatgpt_api.providers.chatgpt.auth import ChatGPTAuthConfig
-from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport
+from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport, ConversationNotFound
 
 ID = "b7f60d76-41d0-4de3-b661-f6f4f8798224"
 
@@ -89,24 +89,81 @@ def test_filtered_list_keeps_pagination_over_project_rows(monkeypatch, tmp_path)
     assert compat._conversation_list_response(config, router, {"offset": ["1"]})[1]["next_offset"] is None
 
 
-def test_transport_uses_single_patch_and_closes_success_and_failure(monkeypatch):
+def test_explicit_uuid_delete_does_not_require_visible_history(monkeypatch, tmp_path):
+    config, router, transport, calls = setup_case(monkeypatch, tmp_path)
+    transport.conversation_snapshot = lambda _: pytest.fail("unguarded deletion must not fetch history")
+    assert compat._conversation_delete_response(config, router, ConversationStreams(), ID, {})[0] == 200
+    assert calls == [ID]
+
+
+def test_upstream_missing_uuid_returns_404_without_local_cleanup(monkeypatch, tmp_path):
+    config, router, transport, _ = setup_case(monkeypatch, tmp_path)
+    store = compat._admin_store(config)
+    store.upsert_conversation_session(conversation_id=ID, parent_message_id="parent", account="primary")
+    def missing(_):
+        raise ConversationNotFound("conversation not found")
+    transport.delete_conversation = missing
+    assert compat._conversation_delete_response(config, router, ConversationStreams(), ID, {})[0] == 404
+    assert store.get_conversation_session(ID) is not None
+
+
+@pytest.mark.parametrize("query", [{}, {"all": ["true"]}, {"account": ["primary"]}, {"account": ["primary"], "all": ["true"], "outside_projects": ["true"]}])
+def test_bulk_delete_requires_explicit_account_and_all_scope(monkeypatch, tmp_path, query):
+    config, router, transport, calls = setup_case(monkeypatch, tmp_path)
+    transport.delete_all_conversations = lambda: calls.append("all")
+    assert compat._conversation_delete_all_response(config, router, ConversationStreams(), query)[0] == 400
+    assert calls == []
+
+
+def test_bulk_delete_clears_only_selected_account_after_confirmation(monkeypatch, tmp_path):
+    config, _, transport, calls = setup_case(monkeypatch, tmp_path)
+    router = compat.AccountRouter(("primary", "backup"), "failover")
+    transport.delete_all_conversations = lambda: calls.append("all")
+    store = compat._admin_store(config)
+    store.upsert_conversation_session(conversation_id=ID, parent_message_id="parent", account="primary", project_id="g-p-example")
+    backup_id = "a9f98e08-0b9b-4d53-81e6-7802b3a3a297"
+    store.upsert_conversation_session(conversation_id=backup_id, parent_message_id="parent", account="backup")
+    streams = ConversationStreams()
+    streams.channel(ID, "primary")
+    streams.channel(backup_id, "backup")
+    status, payload = compat._conversation_delete_all_response(config, router, streams, {"account": ["primary"], "all": ["true"]})
+    assert status == 200 and payload["all"] is True
+    assert calls == ["all"]
+    assert store.get_conversation_session(ID) is None and streams.known(ID) is None
+    assert store.get_conversation_session(backup_id) is not None and streams.known(backup_id) is not None
+
+
+def test_bulk_failure_does_not_clear_local_records(monkeypatch, tmp_path):
+    config, router, transport, _ = setup_case(monkeypatch, tmp_path)
+    store = compat._admin_store(config)
+    store.upsert_conversation_session(conversation_id=ID, parent_message_id="parent", account="primary")
+    def fail():
+        raise ProviderError("ChatGPT did not confirm bulk conversation deletion")
+    transport.delete_all_conversations = fail
+    assert compat._conversation_delete_all_response(config, router, ConversationStreams(), {"account": ["primary"], "all": ["true"]})[0] >= 400
+    assert store.get_conversation_session(ID) is not None
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+def test_transport_uses_single_patch_and_closes_success_and_failure(monkeypatch, bulk):
     from curl_cffi import requests
     calls, closed = [], []
     response = SimpleNamespace(status_code=200, json=lambda: {"success": True}, close=lambda: closed.append(True))
     monkeypatch.setattr(requests, "patch", lambda url, **kwargs: calls.append((url, kwargs)) or response)
     transport = ChatGPTWebTransport(ChatGPTAuthConfig(access_token="test-token"))
-    transport.delete_conversation(ID)
+    delete = transport.delete_all_conversations if bulk else lambda: transport.delete_conversation(ID)
+    delete()
     assert len(calls) == 1
     assert calls[0][1]["json"] == {"is_visible": False}
-    assert calls[0][0].endswith("/backend-api/conversation/" + ID)
+    assert calls[0][0].endswith("/backend-api/conversations" if bulk else "/backend-api/conversation/" + ID)
     response.status_code = 429
     with pytest.raises(ProviderError, match="429"):
-        transport.delete_conversation(ID)
+        delete()
     assert closed == [True, True]
     response.status_code = 200
     response.json = lambda: {"success": False}
     with pytest.raises(ProviderError, match="did not confirm"):
-        transport.delete_conversation(ID)
+        delete()
 
 
 def test_delete_route_requires_auth_and_supports_browser_cors(monkeypatch, tmp_path):

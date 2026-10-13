@@ -69,6 +69,10 @@ class DeepResearchResult:
     metadata: dict[str, Any]
 
 
+class ConversationNotFound(ProviderError):
+    pass
+
+
 class ChatGPTStreamError(ProviderError):
     def __init__(self, code: Any) -> None:
         self.upstream_error_code = code if isinstance(code, str) and re.fullmatch(r"[a-z_]{2,64}", code) else "upstream_error"
@@ -288,6 +292,13 @@ class ChatGPTWebTransport:
         if payload.get("success") is not True:
             raise ProviderError("ChatGPT did not confirm conversation deletion")
 
+    def delete_all_conversations(self) -> None:
+        payload = self._conversation_management_request(
+            "patch", "/backend-api/conversations", payload={"is_visible": False},
+        )
+        if payload.get("success") is not True:
+            raise ProviderError("ChatGPT did not confirm bulk conversation deletion")
+
     def _conversation_management_request(
         self, method: str, path: str, *, params: dict[str, Any] | None = None,
         payload: dict[str, Any] | None = None,
@@ -308,6 +319,8 @@ class ChatGPTWebTransport:
         except Exception as exc:
             raise ProviderError("ChatGPT conversation management request failed") from exc
         try:
+            if method == "patch" and response.status_code == 404:
+                raise ConversationNotFound("conversation not found")
             if response.status_code >= 400:
                 raise ProviderError(f"ChatGPT conversation management failed: {response.status_code}")
             return _json_response(response)

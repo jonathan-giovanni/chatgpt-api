@@ -141,6 +141,14 @@ class ConversationStreams:
         with self._lock:
             self.feeds.pop(session_id, None)
 
+    def discard_account(self, account: str) -> None:
+        with self._lock:
+            ids = {key for key, channel in self.channels.items() if channel.account == account}
+            for key in ids:
+                self.channels.pop(key, None)
+            for key in [key for key, feed in self.feeds.items() if feed.conversation_id in ids]:
+                self.feeds.pop(key, None)
+
     def _expire(self) -> None:
         now = time.monotonic()
         for cache in (self.channels, self.feeds):

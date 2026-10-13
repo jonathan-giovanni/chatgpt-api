@@ -351,6 +351,10 @@ class BridgeAdminStore:
         with self._connect() as db:
             db.execute("DELETE FROM conversation_sessions WHERE conversation_id = ?", (conversation_id,))
 
+    def delete_account_conversation_sessions(self, account: str) -> None:
+        with self._connect() as db:
+            db.execute("DELETE FROM conversation_sessions WHERE account = ?", (account,))
+
     def _artifact_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "file_id": row["file_id"],
