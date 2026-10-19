@@ -208,6 +208,7 @@ def test_voice_offer_preserves_thread_model_and_project(monkeypatch):
     assert '"requested_default_model":""' in body
     assert '"model_slug":""' in body
     assert '"voice_session_id":"VOICE-1"' in body
+    assert '"backend_reasoning_effort"' not in body
 
 
 def test_voice_offer_sends_arbor_internal_id(monkeypatch):

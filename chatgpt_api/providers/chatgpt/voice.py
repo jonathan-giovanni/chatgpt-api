@@ -234,7 +234,6 @@ def _post_offer(
         "voice_mode": "wingman",
         "voice_session_id": voice_id,
         "voice_status_request_id": voice_id,
-        "backend_reasoning_effort": "instant",
         "language_code": "auto",
         # Chat model slugs can be accepted by /wm yet leave a silent voice call.
         # Keep GPT Live selection with ChatGPT; model applies to the text preflight.
