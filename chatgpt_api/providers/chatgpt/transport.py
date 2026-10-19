@@ -1595,12 +1595,43 @@ def _event_to_delta(event: dict[str, Any]) -> ChatDelta | None:
     message_id = _latest_message_id_from_value(event)
     value = event.get("v")
     text = _extract_text(value, event.get("p"))
+    if not text:
+        text = _assistant_message_text(value)
     if text:
         return ChatDelta(text=text, conversation_id=conversation_id, message_id=message_id, raw=event)
     event_type = event.get("type") or event.get("event")
     if event_type == "resume_conversation_token":
         return ChatDelta(conversation_id=conversation_id, message_id=message_id, raw=event)
     return ChatDelta(message_id=message_id, raw=event) if event else None
+
+
+def _assistant_message_text(value: Any) -> str:
+    """Extract text from ChatGPT's full-message snapshots, without echoing user input."""
+    if not isinstance(value, dict):
+        return ""
+    message = value.get("message")
+    if not isinstance(message, dict):
+        message = value
+    author = message.get("author")
+    if not isinstance(author, dict) or author.get("role") != "assistant":
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, dict):
+        return ""
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    text_parts: list[str] = []
+    for part in parts:
+        if isinstance(part, str):
+            text_parts.append(part)
+        elif isinstance(part, dict):
+            part_text = part.get("text")
+            if isinstance(part_text, str):
+                text_parts.append(part_text)
+    return "".join(text_parts)
 
 
 def _extract_text(value: Any, path: Any = None) -> str:

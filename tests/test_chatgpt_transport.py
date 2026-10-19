@@ -504,6 +504,45 @@ def test_event_to_delta_extracts_message_id_for_continuation():
     assert delta.message_id == "assistant-message-1"
 
 
+def test_event_to_delta_extracts_nested_assistant_message_text():
+    delta = _event_to_delta(
+        {
+            "type": "message_marker",
+            "conversation_id": "c1",
+            "v": {
+                "message": {
+                    "id": "assistant-message-1",
+                    "author": {"role": "assistant"},
+                    "content": {"content_type": "text", "parts": ["hello", " world"]},
+                }
+            },
+        }
+    )
+
+    assert delta is not None
+    assert delta.text == "hello world"
+    assert delta.message_id == "assistant-message-1"
+    assert delta.conversation_id == "c1"
+
+
+def test_event_to_delta_does_not_echo_nested_user_message_text():
+    delta = _event_to_delta(
+        {
+            "type": "message_marker",
+            "v": {
+                "message": {
+                    "id": "user-message-1",
+                    "author": {"role": "user"},
+                    "content": {"content_type": "text", "parts": ["user input"]},
+                }
+            },
+        }
+    )
+
+    assert delta is not None
+    assert delta.text == ""
+
+
 def test_event_to_delta_ignores_non_content_patch_values():
     delta = _event_to_delta(
         {
