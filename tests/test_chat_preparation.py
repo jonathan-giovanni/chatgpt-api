@@ -182,7 +182,7 @@ def test_limit_is_computed_once_per_request_and_refreshes_next_request(tmp_path)
 
 def test_configured_default_is_published_without_claiming_observed_support(monkeypatch):
     monkeypatch.setattr(compat, "_models_for_account", lambda *_a: [{"id": "auto", "name": "Auto"}])
-    model = next(m for m in compat._models_for_config(OpenAICompatConfig(account="test")) if m["id"] == "gpt-6-mini")
+    model = next(m for m in compat._models_for_config(OpenAICompatConfig(account="test")) if m["id"] == "gpt-6-instant")
     assert model["chatgpt"]["source"] == "configured"
 
 
@@ -213,7 +213,7 @@ def test_default_chat_model_and_explicit_selection_are_preserved(monkeypatch, tm
         asyncio.run(compat._chat_completion_stream(config, body, compat.AccountRouter(("test",)), Handler()))
     else:
         asyncio.run(compat._chat_completion(config, body))
-    expected = explicit or "gpt-6-mini"
+    expected = explicit or "gpt-6-instant"
     assert requests and requests[0].model == ("gpt-5-5-thinking" if explicit and explicit.endswith("standard") else expected)
     assert requests[0].thinking_effort == ("standard" if explicit and explicit.endswith("standard") else None)
 

@@ -157,7 +157,7 @@ These provider-specific switches work for JSON and streamed ordinary chat:
 | --- | --- | --- |
 | `CHATGPT_PARALLEL_PREPARATION` | `true` | Overlap fresh prepare/requirements HTTP calls. Both use the original captured session headers; requirements does not consume the prepare response. No additional retry or request is introduced. Set `false` for the sequential baseline. |
 | JSON `chatgpt_parallel_preparation` | Environment default | Boolean override for comparing sequential and parallel preparation. |
-| `CHATGPT_DEFAULT_MODEL` / server `--default-model` | `gpt-6-mini` | Lightweight ordinary-chat default when the client omits `model`; an explicit model, including `auto`, is preserved. `/v1/models` lists observed models and the configured default; `source: configured` alone does not confirm account support. |
+| `CHATGPT_DEFAULT_MODEL` / server `--default-model` | `gpt-6-instant` | Fast ordinary-chat default when the client omits `model`; no thinking effort or automatic fallback is configured. `/v1/models` lists observed models and the configured default; `source: configured` alone does not confirm account support. |
 
 Requirements/proof caching, HTTP pooling, callback streaming and their
 experimental controls were removed. Cache trials had no eligible hits, and
@@ -166,10 +166,11 @@ remains fresh on every turn. The conversation transport stops parsing at
 `[DONE]` and closes its response. No extra speculative request or retry is
 added for performance.
 
-`gpt-6-mini` was validated in the local comparison, not established as the
-fastest model for every account or workload. Change the configured default if
-your account lacks that model; use explicit `auto` to delegate model selection
-to ChatGPT. The live voice handshake still lets ChatGPT select its voice model.
+`gpt-6-instant` is the configured fast default and was confirmed in the active
+Raspberry Pi account's model picker; this does not claim a latency benchmark
+for every account or workload. Change the configured default if your account
+lacks that model. The live voice handshake still lets ChatGPT select its voice
+model.
 
 ## Paired comparison with and without a Project
 

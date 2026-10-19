@@ -16,7 +16,7 @@ CHATGPT_API_KEY=local-dev-key chatgpt-api serve --port 8000
 ```text
 baseURL = http://127.0.0.1:8000/v1
 apiKey  = local-dev-key
-model   = gpt-6-mini
+model   = gpt-6-instant
 ```
 
 Use `model = auto` when you want ChatGPT Web to choose the model like the web UI
@@ -25,11 +25,12 @@ availability failures to surface clearly instead of being hidden by web-side
 fallback behavior.
 
 If an ordinary chat request omits `model`, the bridge uses the configured
-`CHATGPT_DEFAULT_MODEL` (or server `--default-model`), initially `gpt-6-mini`.
-An explicit `model`, including `auto`, takes precedence. This lightweight
-default was validated locally; availability and relative latency depend on the
-account and workload. `/v1/models` lists the configured account capabilities.
-Live voice model selection remains automatic upstream.
+`CHATGPT_DEFAULT_MODEL` (or server `--default-model`), initially
+`gpt-6-instant`. Automatic model fallback is disabled, so a model error is
+returned rather than silently switching to Auto or an older model. Confirm
+account support in `/v1/models`; the configured default alone does not prove
+availability. Thinking effort is omitted unless a client requests it. Live
+voice model selection remains automatic upstream.
 
 Ordinary text turns fetch fresh prepare/requirements in parallel by default.
 They do not cache validation tokens or authentication, and the conversation
@@ -177,7 +178,7 @@ Representative aliases:
 
 ```text
 auto
-gpt-6-mini
+gpt-6-instant
 gpt-5-5
 gpt-5-5-thinking-standard
 gpt-5-5-thinking-extended
@@ -194,8 +195,8 @@ chatgpt-deep-research
 
 Rules:
 
-- An omitted ordinary-chat model uses the configured lightweight default,
-  initially `gpt-6-mini`; it still requires account support.
+- An omitted ordinary-chat model uses the configured fast default,
+  initially `gpt-6-instant`; it still requires account support.
 - Use explicit `auto` to let ChatGPT choose an available model for the account.
 - `/v1/models` includes the configured default even if it was not observed in
   the account catalog. Its `chatgpt.source: configured` metadata does not
@@ -829,7 +830,7 @@ confirmó `gpt-5-6-thinking` con esfuerzo `extended`. La familia histórica
 `auto` como migración. La ausencia de un slug en una captura no demuestra que
 ChatGPT lo haya retirado globalmente; indica que el bridge no debe prometerlo
 para esa cuenta. Si una petición de chat omite `model`, el bridge usa
-`CHATGPT_DEFAULT_MODEL` o `--default-model`, inicialmente `gpt-6-mini`. Un
+`CHATGPT_DEFAULT_MODEL` o `--default-model`, inicialmente `gpt-6-instant`. Un
 `model` explícito se conserva; la selección del modelo de voz sigue siendo
 automática en ChatGPT.
 

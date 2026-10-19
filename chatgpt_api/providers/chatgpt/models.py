@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-DEFAULT_CHAT_MODEL = "gpt-6-mini"
+DEFAULT_CHAT_MODEL = "gpt-6-instant"
 
 
 EFFORT_SUFFIX = re.compile(

@@ -88,11 +88,10 @@ deployments where account captures are managed outside the container.
 : Bearer token required by local clients. Default example is `local-dev-key`.
 
 `CHATGPT_DEFAULT_MODEL`
-: Ordinary-chat default when clients omit `model`; initially `gpt-6-mini`, a
-  lightweight model validated locally. Explicit models, including `auto`, take
-  precedence. Check observed entries in `/v1/models`; `source: configured`
-  alone does not confirm account support. Change this value when your account
-  needs another model. The live voice model remains automatic.
+: Ordinary-chat default when clients omit `model`; `gpt-6-instant` is selected
+  for speed. Automatic model fallback and thinking effort are disabled by
+  default. Check observed entries in `/v1/models`; `source: configured` alone
+  does not confirm account support. The live voice model remains automatic.
 
 `CHATGPT_PARALLEL_PREPARATION`
 : Default `true`. Runs fresh prepare/requirements requests in parallel without
