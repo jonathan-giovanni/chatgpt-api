@@ -109,11 +109,11 @@
         {
           name: "model",
           type: "string",
-          defaultValue: "gpt-6-mini (server configurable)",
+          defaultValue: "gpt-6-instant (server configurable)",
           meaning:
-            "Defaults to the lightweight gpt-6-mini, without thinking effort. You can select another model; use auto for accounts limited to automatic routing.",
+            "Defaults to the fast gpt-6-instant model, with no thinking effort or automatic fallback. You can still select another model explicitly.",
           recommended:
-            "Omit model for the configured lightweight default; use auto for automatic routing or chatgpt-deep-research for research.",
+            "Omit model to use gpt-6-instant; choose another explicitly supported GPT-6 model only when needed.",
           gotcha:
             "This is not a full OpenAI model catalog. It maps to ChatGPT Web account capability and can fail if that account is limited.",
         },
@@ -719,7 +719,7 @@
   let projectId = $state("");
   let projectAccount = $state("");
 
-  const DEFAULT_CHAT_MODEL = "gpt-6-mini";
+  const DEFAULT_CHAT_MODEL = "gpt-6-instant";
   let chatModel = $state(DEFAULT_CHAT_MODEL);
   let chatDefaultLoaded = false;
   let chatPrompt = $state(

@@ -668,8 +668,8 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--model-fallback",
-        default=os.environ.get("CHATGPT_MODEL_FALLBACK", "auto"),
-        help="Fallback ChatGPT model after recoverable model errors. Use 'none' to disable.",
+        default=os.environ.get("CHATGPT_MODEL_FALLBACK", "none"),
+        help="Fallback ChatGPT model after recoverable model errors. Disabled by default; set an explicit model to enable.",
     )
     parser.set_defaults(temporary_chat=_env_bool("CHATGPT_TEMPORARY_CHAT", True))
     parser.add_argument(
@@ -3122,7 +3122,7 @@ def _apply_interactive_serve_args(args: argparse.Namespace) -> None:
         default=args.public_base_url or f"http://127.0.0.1:{args.port}/v1",
     )
     args.agent_mode = _prompt_choice("agent prompt mode", ["optimized", "opencode"], default=args.agent_mode if args.agent_mode in {"optimized", "opencode"} else "optimized")
-    args.model_fallback = _prompt_text("model fallback (auto or none)", default=args.model_fallback)
+    args.model_fallback = _prompt_text("model fallback (none disables fallback)", default=args.model_fallback)
     args.temporary_chat = _prompt_choice(
         "chat privacy",
         ["temporary", "normal"],

@@ -19,7 +19,7 @@ class OpenAICompatConfig:
     impersonate: str = "safari184"
     agent_prompt_mode: str = "optimized"
     account_strategy: str = "auto"
-    model_fallback: str | None = "auto"
+    model_fallback: str | None = None
     temporary_chat: bool = True
     image_output_dir: Path = Path("outputs/chatgpt-images")
     research_output_dir: Path = Path("outputs/chatgpt-research")

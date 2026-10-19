@@ -145,7 +145,7 @@ Recent project updates include:
 - **Chrome account connector:** a Manifest V3 extension checks localhost before an optional LAN IP, automatically links a matching existing account from a normal Chrome ChatGPT session, and refreshes its encrypted capture. Its pulse icon shows health and toggles automatic renewal two days before expiry; the dashboard header reflects account status. See [Chrome connector](docs/CHROME_EXTENSION.md) for setup and limits.
 
 - **Model discovery and Project routing:** modernizes model metadata and lets new chats target an optional ChatGPT Project.
-- **Chat latency:** fresh prepare/requirements calls run in parallel by default; the conversation stream keeps its existing transport. Test Lab shows ordinary text as SSE chunks arrive and reports first-text and total time. SQLite skips repeated schema work and closes connections explicitly. Private timing logs separate first text, upstream completion, and local cleanup. Ordinary chat defaults to the lightweight `gpt-6-mini`; explicit models, including `auto`, remain available. Unhelpful caching and pooling experiments were removed. See [request metrics](docs/REQUEST_METRICS.md).
+- **Chat latency and model default:** fresh prepare/requirements calls run in parallel by default; the conversation stream keeps its existing transport. Test Lab shows ordinary text as SSE chunks arrive and reports first-text and total time. SQLite skips repeated schema work and closes connections explicitly. Private timing logs separate first text, upstream completion, and local cleanup. Ordinary chat defaults to the account's `gpt-6-instant` model, with no thinking effort and no automatic model fallback. See [request metrics](docs/REQUEST_METRICS.md).
 - **Chat and SIP voice attachments:** accepts bounded text, PDF, Office, image, and WAV/MP3 files. The SIP/RTP panel stages a selected list locally and sends it with the initial conversation request. Audio files sent this way are generic attachments and do not guarantee transcription.
 - **Conversation continuity:** returns a conversation UUID and accepts it on later requests to continue the same ChatGPT conversation, preserving its account and Project routing.
 - **Conversation text timeline and stream:** loads the visible history once by UUID, then updates user/assistant messages and timestamps from actual WebRTC or SIP data channel events. The dashboard listens over SSE, reconnects with a cached snapshot, and never polls ChatGPT for live text. Manual **Actualizar** reloads history. Audio without upstream transcription is reported separately.
@@ -716,16 +716,17 @@ resolves the private Project ID and its linked account locally. Leave the field
 out to create a conversation outside Projects. You may also specify `model` and
 attach supported files to the first message.
 
-Ordinary chat uses `gpt-6-mini` when `model` is omitted. Configure another
-default with `CHATGPT_DEFAULT_MODEL` or server `--default-model`; an explicit
-`model`, including `auto`, takes precedence. Check `/v1/models` for account
-support. This is a lightweight default validated locally, not a guarantee that
-it is the fastest option for every workload. ChatGPT still chooses the live
-voice model automatically.
+Ordinary chat uses `gpt-6-instant` when `model` is omitted. Configure another
+default with `CHATGPT_DEFAULT_MODEL` or server `--default-model`. Model fallback
+is disabled by default, so a model error is returned instead of silently
+switching to Auto or an older model. Confirm that the selected ChatGPT account
+exposes the model in `/v1/models`. Thinking effort is omitted unless a client
+requests one explicitly. ChatGPT still chooses the live voice model
+automatically.
 
 ```json
 {
-  "model": "auto",
+  "model": "gpt-6-instant",
   "chatgpt_project": "Example Project",
   "messages": [{"role": "user", "content": "Start a new conversation."}]
 }
@@ -1648,10 +1649,10 @@ Common environment variables:
 | `CHATGPT_RESEARCH_OUTPUT_DIR` | `./outputs/chatgpt-research` | Deep Research report directory. |
 | `CHATGPT_ADMIN_DB_PATH` | `./outputs/chatgpt-admin.sqlite` | Console/admin SQLite metadata. |
 | `CHATGPT_AGENT_MODE` | `optimized` | Tool bridge prompt mode. |
-| `CHATGPT_DEFAULT_MODEL` | `gpt-6-mini` | Lightweight ordinary-chat default when `model` is omitted; explicit model/`auto` takes precedence. Account support is required. |
+| `CHATGPT_DEFAULT_MODEL` | `gpt-6-instant` | Fast ordinary-chat default when `model` is omitted. Account support is required. |
 | `CHATGPT_PARALLEL_PREPARATION` | `true` | Run fresh prepare/requirements HTTP calls concurrently. |
 | `CHATGPT_REQUEST_METRICS` | `false` | Write content-free latency spans, status codes, counts, and completion marks; returns `X-Request-Id` for trace correlation. |
-| `CHATGPT_MODEL_FALLBACK` | `auto` | Fallback model after recoverable model errors. |
+| `CHATGPT_MODEL_FALLBACK` | `none` | Automatic model fallback is disabled by default. |
 | `CHATGPT_TEMPORARY_CHAT` | `true` | Use temporary ChatGPT chats for normal chat completions. |
 | `CHATGPT_WEB_TIMEOUT` | `5400` | Provider timeout in seconds; long enough for Deep Research. |
 | `CHATGPT_CHAT_CONCURRENCY` | plan defaults | Local chat throttle. |
